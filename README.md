@@ -1,3 +1,8 @@
+To use, install /targets/Immunofluorescence_Analysis-0.1.0-SNAPSHOT.jar (not the sources jar) into the plugin folder in Fiji
+
+
+Initial Readme (change later):
+
 This is an example Maven project implementing an ImageJ 1.x plugin.
 
 For an example Maven project implementing an **ImageJ2 command**, see:
