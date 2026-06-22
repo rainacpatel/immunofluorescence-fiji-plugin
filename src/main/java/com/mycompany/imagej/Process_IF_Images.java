@@ -11,6 +11,7 @@ import ij.io.FileSaver;
 import ij.process.ImageProcessor;
 import ij.IJ;
 import ij.plugin.RGBStackMerge;
+import ij.plugin.RGBStackConverter;
 import ij.process.LUT;
 import java.awt.image.IndexColorModel;
 import java.util.Arrays;
@@ -22,13 +23,18 @@ public class Process_IF_Images implements PlugIn {
     private int IFChannel;
     private int IFMin;          // ADDED: global display minimum for IF channel
     private int IFMax;
+    private String IFColor;     // ADDED: user-assigned display color for IF channel
     private int junctionChannel;
     private int junctionMin;    // ADDED: global display minimum for Junction channel
     private int junctionMax;
+    private String junctionColor; // ADDED: user-assigned display color for Junction channel
     private int dapiChannel;
     private int dapiMin;        // ADDED: global display minimum for DAPI channel
     private int dapiMax;
+    private String dapiColor;   // ADDED: user-assigned display color for DAPI channel
     private String saveDir;
+
+    private static final String[] COLOR_OPTIONS = {"Red", "Green", "Blue", "Gray", "Cyan", "Magenta", "Yellow"};
 
     public void run(String arg) {
         int[] ids = WindowManager.getIDList();
@@ -48,8 +54,11 @@ public class Process_IF_Images implements PlugIn {
         // Section 1: channel assignment
         gd.addMessage("── Channel assignment (1 to " + nChannels + ") ──────────────────");
         gd.addNumericField("Protein / IF channel:", 1, 0);
+        gd.addChoice("IF color:", COLOR_OPTIONS, "Green");
         gd.addNumericField("Junction channel:", 2, 0);
+        gd.addChoice("Junction color:", COLOR_OPTIONS, "Red");
         gd.addNumericField("DAPI channel:", 3, 0);
+        gd.addChoice("DAPI color:", COLOR_OPTIONS, "Blue");
 
         // Section 2: global LUT
         // AMENDED: display range set once, applied identically to every image
@@ -69,11 +78,15 @@ public class Process_IF_Images implements PlugIn {
 
         if (gd.wasCanceled()) return;
 
-        // Read channel assignments first, then Min/Max pairs
-        // in the same order they were added to the dialog above
+        // Read fields in the exact order they were added to the dialog above:
+        // channel number, then color choice, for each of IF/Junction/DAPI,
+        // followed by the six Min/Max sliders.
         IFChannel       = (int) gd.getNextNumber();
+        IFColor         = gd.getNextChoice();
         junctionChannel = (int) gd.getNextNumber();
+        junctionColor   = gd.getNextChoice();
         dapiChannel     = (int) gd.getNextNumber();
+        dapiColor       = gd.getNextChoice();
         IFMin           = (int) gd.getNextNumber();
         IFMax           = (int) gd.getNextNumber();
         junctionMin     = (int) gd.getNextNumber();
@@ -156,6 +169,12 @@ public class Process_IF_Images implements PlugIn {
             return false;
         }
 
+        if (IFColor.equals(dapiColor) || IFColor.equals(junctionColor)
+                || dapiColor.equals(junctionColor)) {
+            IJ.showMessage("Error", imageTitle + ": Each channel must have a unique color.");
+            return false;
+        }
+
         ImagePlus[] channels = ChannelSplitter.split(imp);
 
         // AMENDED: pass both Min and Max for consistent global LUT across batch
@@ -166,18 +185,53 @@ public class Process_IF_Images implements PlugIn {
         ImagePlus junctionIm = changeAndRenameChannel(channels, junctionChannel,
                                    imp.getTitle(), "Junction", junctionMin, junctionMax);
 
+        // FIX: apply LUTs directly to each processor instead of IJ.run(imp, "Green", "").
+        // IJ.run() color-LUT commands act on whatever ImageJ resolves as the "current"
+        // image via the WindowManager, which is unreliable for off-screen images
+        // produced by ChannelSplitter.split() (they're never shown/activated). That
+        // caused the LUT to silently not apply, leaving channels grayscale and giving
+        // RGBStackMerge nothing but gray LUTs to read color from when building the
+        // composite — hence the black & white outputs and the failed-looking merge.
+        //
+        // ADDED: colors are now whatever the user picked in the dialog per channel,
+        // instead of being hardcoded to IF=green/Junction=red/DAPI=blue. Acquisition
+        // channel order varies between sessions, so the color has to be assignable.
+        applyLut(plaIm,      IFColor);
+        applyLut(junctionIm, junctionColor);
+        applyLut(dapiIm,     dapiColor);
+
+        // FIX: save colorized channel images AFTER the LUT is applied.
+        // Previously these were saved before colorization, so the per-channel
+        // TIFFs written to disk were always grayscale regardless of whether the
+        // LUT commands worked.
         saveImage(plaIm,      dir, false);
         saveImage(dapiIm,     dir, false);
         saveImage(junctionIm, dir, false);
 
-        IJ.run(plaIm,      "Green", "");
-        IJ.run(junctionIm, "Red",   "");
-        IJ.run(dapiIm,     "Blue",  "");
+        // ADDED: build the merge input by color slot rather than assuming a fixed
+        // IF/Junction/DAPI -> green/red/blue mapping. RGBStackMerge.mergeChannels
+        // reads each ImagePlus's own LUT to decide its contribution, but still
+        // expects positional c1=red, c2=green, c3=blue slots, so we sort our three
+        // colorized images into the right positions based on what was picked.
+        ImagePlus[] mergeInput = buildMergeInput(plaIm, IFColor,
+                                                  junctionIm, junctionColor,
+                                                  dapiIm, dapiColor);
 
-        ImagePlus merged = RGBStackMerge.mergeChannels(
-                new ImagePlus[]{plaIm, junctionIm, dapiIm}, false);
+        ImagePlus merged = RGBStackMerge.mergeChannels(mergeInput, false);
 
         if (merged != null) {
+            // FIX: mergeChannels()/mergeHyperstacks() always returns a composite
+            // hyperstack — channels stay a separate dimension, they are NOT
+            // flattened into RGB pixels. Saved as-is, a 15-slice x 3-channel
+            // composite writes out as 45 individual grayscale-with-LUT planes
+            // (channels x slices), which is the "45 instead of 15, all looking
+            // red" behavior. The manual recorder macro confirms the missing step:
+            // it always follows "Merge Channels... create" with "RGB Color" to
+            // flatten. RGBStackConverter.convertToRGB() is the equivalent direct
+            // API call, and is safe to use with no window present (headless/batch).
+            if (merged.isComposite()) {
+                RGBStackConverter.convertToRGB(merged);
+            }
             merged.setTitle("Merged_" + imp.getTitle());
             saveImage(merged, dir, false);
         } else {
@@ -191,20 +245,92 @@ public class Process_IF_Images implements PlugIn {
         return ch >= 1 && ch <= max;
     }
 
+    // Pure single/dual-channel LUTs matching ImageJ's built-in "Red"/"Green"/etc.
+    // commands, applied directly to the processor so it doesn't depend on
+    // WindowManager's "current image" resolution.
+    private void applyLut(ImagePlus imp, String colorName) {
+        byte[] r = new byte[256];
+        byte[] g = new byte[256];
+        byte[] b = new byte[256];
+        for (int i = 0; i < 256; i++) {
+            byte v = (byte) i;
+            switch (colorName) {
+                case "Red":     r[i] = v; break;
+                case "Green":   g[i] = v; break;
+                case "Blue":    b[i] = v; break;
+                case "Gray":    r[i] = v; g[i] = v; b[i] = v; break;
+                case "Cyan":    g[i] = v; b[i] = v; break;
+                case "Magenta": r[i] = v; b[i] = v; break;
+                case "Yellow":  r[i] = v; g[i] = v; break;
+                default:
+                    throw new IllegalArgumentException("Unknown color: " + colorName);
+            }
+        }
+        LUT lut = new LUT(r, g, b);
+        ImageProcessor ip = imp.getProcessor();
+        ip.setLut(lut);
+        imp.setProcessor(ip);
+        imp.updateImage();
+    }
+
+    // ADDED: RGBStackMerge.mergeChannels expects images positionally slotted as
+    // {red, green, blue, gray, cyan, magenta, yellow}, with null for unused slots.
+    // This places each of our three colorized channels into its correct slot
+    // based on the color the user picked, rather than assuming a fixed mapping.
+    private ImagePlus[] buildMergeInput(ImagePlus im1, String color1,
+                                         ImagePlus im2, String color2,
+                                         ImagePlus im3, String color3) {
+        ImagePlus[] slots = new ImagePlus[7]; // red, green, blue, gray, cyan, magenta, yellow
+        placeInSlot(slots, im1, color1);
+        placeInSlot(slots, im2, color2);
+        placeInSlot(slots, im3, color3);
+        return slots;
+    }
+
+    private void placeInSlot(ImagePlus[] slots, ImagePlus imp, String colorName) {
+        int idx = Arrays.asList(COLOR_OPTIONS).indexOf(colorName);
+        if (idx < 0) {
+            throw new IllegalArgumentException("Unknown color: " + colorName);
+        }
+        slots[idx] = imp;
+    }
+
     // AMENDED: added minNum parameter for full Min-Max display range
     // FIX: was label+"cleanTitle" — "cleanTitle" was a string literal, not the variable.
     // Every output was named e.g. "IF_cleanTitle.tif" breaking all downstream
     // file discovery by prefix matching.
+    // FIX: ch.getProcessor() only returns the processor for the CURRENTLY ACTIVE
+    // slice of the stack. An earlier version called setMinAndMax()/convertToByte()
+    // on that single processor only, then wrote it back with ch.setProcessor(ip) —
+    // which also only replaces the active slice, leaving every other slice in a
+    // multi-slice z-stack unadjusted.
+    // FIX: a later version guarded the rescale behind `getBitDepth() != 8`, using
+    // StackConverter.convertToGray8() to do the conversion. That guard was wrong:
+    // when the source is already 8-bit, convertToGray8() does NOT rescale pixel
+    // values to the given min/max — it only rescales when converting FROM 16-bit/
+    // 32-bit/RGB. For already-8-bit sources the guard skipped rescaling entirely,
+    // so the slider adjustment was set as processor metadata but never baked into
+    // pixel values — explaining why the channel TIFF didn't visibly reflect a big
+    // adjustment while the merge (which derives its contrast from the live display
+    // range during the RGB-flatten step) did.
+    // Now every slice is explicitly rebuilt via convertToByte(true) regardless of
+    // starting bit depth, so the min/max is always actually baked into the saved
+    // pixel data, for every slice.
     private ImagePlus changeAndRenameChannel(ImagePlus[] channels, int chIndex,
                                               String baseTitle, String label,
                                               int minNum, int maxNum) {
         ImagePlus ch = channels[chIndex - 1];
-        ImageProcessor ip = ch.getProcessor();
+        ImageStack stack = ch.getStack();
+        ImageStack rescaledStack = new ImageStack(stack.getWidth(), stack.getHeight());
 
-        ip.setMinAndMax(minNum, maxNum);
-        ip.snapshot();
-        ip = ip.convertToByte(true);
-        ch.setProcessor(ip);
+        for (int slice = 1; slice <= stack.getSize(); slice++) {
+            ImageProcessor sliceIp = stack.getProcessor(slice);
+            sliceIp.setMinAndMax(minNum, maxNum);
+            ImageProcessor byteIp = sliceIp.convertToByte(true);
+            rescaledStack.addSlice(stack.getSliceLabel(slice), byteIp);
+        }
+
+        ch.setStack(rescaledStack);
 
         String cleanTitle = baseTitle.replaceAll("(?i)\\.(tif|tiff|jpg|png)$", "");
         ch.setTitle(label + "_" + cleanTitle);
