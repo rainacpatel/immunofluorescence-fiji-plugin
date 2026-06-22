@@ -12,16 +12,16 @@
 		<relativePath />
 	</parent>
 
-	<groupId>com.mycompany</groupId>        <!-- FIXME: Your organization groupId here -->
-	<artifactId>Process_Pixels</artifactId> <!-- FIXME: Your project artifactId here   -->
+	<groupId>rcp.aklab</groupId>        <!-- FIXME: Your organization groupId here -->
+	<artifactId>Immunofluorescence_Analysis</artifactId> <!-- FIXME: Your project artifactId here   -->
 	<version>0.1.0-SNAPSHOT</version>
 
-	<name>Process Pixels</name>                                                   <!-- FIXME: Your project name here          -->
+	<name>Immunofluorescence Analysis</name>                                                   <!-- FIXME: Your project name here          -->
 	<description>A Maven project implementing an ImageJ 1.x plugin.</description> <!-- FIXME: Your project description here   -->
 	<url>https://mycompany.com/imagej/process-pixels/</url>                       <!-- FIXME: Your project website here       -->
 	<inceptionYear>2012</inceptionYear>                                           <!-- FIXME: Your project starting year here -->
 	<organization>
-		<name>My Company</name>           <!-- FIXME: Your organization name here    -->
+		<name>AK Lab</name>           <!-- FIXME: Your organization name here    -->
 		<url>https://mycompany.com/</url> <!-- FIXME: Your organization website here -->
 	</organization>
 	<licenses>
