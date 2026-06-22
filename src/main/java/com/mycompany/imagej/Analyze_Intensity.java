@@ -97,14 +97,20 @@ public class Analyze_Intensity implements PlugIn {
         ImagePlus jMask = createMaskFromImage(impJunction);
         if (jMask == null) return;
 
-        ImageProcessor dapiIp = impDAPI.getProcessor().duplicate();
-        dapiIp.setAutoThreshold("Huang");
-        dapiIp.autoThreshold();
-        dapiIp.resetMinAndMax();
-        dapiIp.setBinaryThreshold();
-        ImagePlus dMask = new ImagePlus(impDAPI.getTitle(), dapiIp);
-        Prefs.blackBackground = true;
-        IJ.run(dMask, "Median", "radius=3");
+        ImagePlus dMaskImp=impDAPI.duplicate();
+        IJ.setAutoThreshold(dMaskImp,"Huang dark");
+        IJ.run(dMaskImp,"Convert to Mask", "");
+        Prefs.blackBackground=true;
+        IJ.run(dMaskImp,"Median","radius=3");
+        ImagePlus dMask= dMaskImp;
+                //ImageProcessor dapiIp = impDAPI.getProcessor().duplicate();
+        //dapiIp.setAutoThreshold("Huang");
+        //dapiIp.autoThreshold();
+        //dapiIp.resetMinAndMax();
+        //dapiIp.setBinaryThreshold();
+        //ImagePlus dMask = new ImagePlus(impDAPI.getTitle(), dapiIp);
+        //Prefs.blackBackground = true;
+        //IJ.run(dMask, "Median", "radius=3");
 
         // cytoplasmic mask = whole cell - nucleus - junction
         ImagePlus cytoMask = createCytoplasmicMask(dMask, jMask);

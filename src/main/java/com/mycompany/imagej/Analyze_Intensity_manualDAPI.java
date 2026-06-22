@@ -96,8 +96,8 @@ public class Analyze_Intensity_manualDAPI implements PlugIn {
         // make masks
         ImagePlus jMask = createMaskFromImage(impJunction);
         if (jMask == null) return;
-        ImagePlus dMask = createMaskFromImage(impDapi);
-        if (dMask = null) return;
+        ImagePlus dMask = createMaskFromImage(impDAPI);
+        if (dMask == null) return;
 
         // cytoplasmic mask = whole cell - nucleus - junction
         ImagePlus cytoMask = createCytoplasmicMask(dMask, jMask);
