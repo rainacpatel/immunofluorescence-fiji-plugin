@@ -9,6 +9,7 @@ import ij.gui.GenericDialog;
 import java.io.File;
 import ij.io.FileSaver;
 import ij.process.ImageProcessor;
+import ij.process.ColorProcessor;
 import ij.IJ;
 import ij.plugin.RGBStackMerge;
 import ij.plugin.RGBStackConverter;
@@ -54,9 +55,9 @@ public class Process_IF_Images implements PlugIn {
         // Section 1: channel assignment
         gd.addMessage("── Channel assignment (1 to " + nChannels + ") ──────────────────");
         gd.addNumericField("Protein / IF channel:", 1, 0);
-        gd.addChoice("IF color:", COLOR_OPTIONS, "Green");
+        gd.addChoice("IF color:", COLOR_OPTIONS, "Red");
         gd.addNumericField("Junction channel:", 2, 0);
-        gd.addChoice("Junction color:", COLOR_OPTIONS, "Red");
+        gd.addChoice("Junction color:", COLOR_OPTIONS, "Green");
         gd.addNumericField("DAPI channel:", 3, 0);
         gd.addChoice("DAPI color:", COLOR_OPTIONS, "Blue");
 
@@ -119,7 +120,7 @@ public class Process_IF_Images implements PlugIn {
                 imageFolder.mkdirs();
             }
 
-            saveImage(imp, imageFolder.getAbsolutePath(), true);
+            saveImage(imp, imageFolder.getAbsolutePath(), true, false);
             suc = splitImage(imp, imageFolder.getAbsolutePath());
         }
 
@@ -131,9 +132,35 @@ public class Process_IF_Images implements PlugIn {
         }
     }
 
-    private String saveImage(ImagePlus imp, String dir, boolean original) {
-        String title = imp.getTitle();
-        String safeTitle = title.replaceAll("[\\\\/:*?\"<>|]", "_");
+    private String saveImage(ImagePlus img, String dir, boolean original, boolean OneChannelConvertToRGB) {
+    	ImagePlus imp = img.duplicate();
+    	if (OneChannelConvertToRGB) {
+    		ImageStack oldStack = imp.getStack();
+    	    int width = imp.getWidth();
+    	    int height = imp.getHeight();
+    	    int size = oldStack.getSize();
+
+    	    // 1. Create a fresh, empty container for the destination RGB processors
+    	    ImageStack newStack = new ImageStack(width, height);
+
+    	    // 2. Iterate sequentially through every slice in your single-channel stack
+    	    for (int i = 1; i <= size; i++) {
+    	        ImageProcessor ip = oldStack.getProcessor(i);
+    	        
+    	        // Convert the current slice processor to an interleaved 24-bit ColorProcessor
+    	        ColorProcessor cp = (ColorProcessor) ip.convertToRGB();
+    	        
+    	        // Append it using the original slice label string
+    	        newStack.addSlice(oldStack.getSliceLabel(i), cp);
+    	    }
+
+    	    // 3. Swap the old single-channel memory heap out for the new RGB layout stack
+    	    imp.setStack(newStack);
+    		}
+        
+    	String title = imp.getTitle();
+    	String cleanTitle = title.replaceFirst("^DUP_", "");
+        String safeTitle = cleanTitle.replaceAll("[\\\\/:*?\"<>|]", "_");
         if (original) {
             safeTitle = "Original_" + safeTitle;
         }
@@ -199,14 +226,16 @@ public class Process_IF_Images implements PlugIn {
         applyLut(plaIm,      IFColor);
         applyLut(junctionIm, junctionColor);
         applyLut(dapiIm,     dapiColor);
+        
+        
 
         // FIX: save colorized channel images AFTER the LUT is applied.
         // Previously these were saved before colorization, so the per-channel
         // TIFFs written to disk were always grayscale regardless of whether the
         // LUT commands worked.
-        saveImage(plaIm,      dir, false);
-        saveImage(dapiIm,     dir, false);
-        saveImage(junctionIm, dir, false);
+        saveImage(plaIm,      dir, false, true);
+        saveImage(dapiIm,     dir, false, true);
+        saveImage(junctionIm, dir, false, true);
 
         // ADDED: build the merge input by color slot rather than assuming a fixed
         // IF/Junction/DAPI -> green/red/blue mapping. RGBStackMerge.mergeChannels
@@ -233,7 +262,7 @@ public class Process_IF_Images implements PlugIn {
                 RGBStackConverter.convertToRGB(merged);
             }
             merged.setTitle("Merged_" + imp.getTitle());
-            saveImage(merged, dir, false);
+            saveImage(merged, dir, false, false);
         } else {
             IJ.log("Failed to create merged image for: " + imp.getTitle());
             return false;
@@ -272,6 +301,7 @@ public class Process_IF_Images implements PlugIn {
         imp.setProcessor(ip);
         imp.updateImage();
     }
+    
 
     // ADDED: RGBStackMerge.mergeChannels expects images positionally slotted as
     // {red, green, blue, gray, cyan, magenta, yellow}, with null for unused slots.
