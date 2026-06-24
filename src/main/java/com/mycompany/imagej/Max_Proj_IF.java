@@ -3,6 +3,7 @@ package com.mycompany.imagej; //change here and pom.xml
 import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
+import ij.WindowManager;
 import ij.gui.NonBlockingGenericDialog;
 import ij.plugin.PlugIn;
 import ij.plugin.ZProjector;
@@ -145,7 +146,7 @@ public class Max_Proj_IF implements PlugIn {
 
         for (File folder : foldersToProcess) {
             boolean ok = processOneFolder(folder.getAbsolutePath(), rangeMode,
-                                           firstSlice, lastSlice, projMethod);
+                                           firstSlice, lastSlice, projMethod, batchMode);
             if (ok) successes.add(folder.getName());
             else    failures.add(folder.getName());
         }
@@ -202,7 +203,8 @@ public class Max_Proj_IF implements PlugIn {
     // sizes between folders (or even between channels within a folder) each
     // get correct, independently-computed ranges rather than one global range.
     private boolean processOneFolder(String dir, String rangeMode,
-                                      int manualFirst, int manualLast, String projMethod) {
+                                      int manualFirst, int manualLast, String projMethod,
+                                      boolean closeInBatch) {
 
         File junctionFile = findFileByPrefix(new File(dir), "Junction_");
         if (junctionFile == null) {
@@ -255,10 +257,18 @@ public class Max_Proj_IF implements PlugIn {
         IJ.saveAsTiff(projIF,       new File(saveFolder, projIF.getShortTitle()       + ".tif").getAbsolutePath());
         IJ.saveAsTiff(projMerged,   new File(saveFolder, projMerged.getShortTitle()   + ".tif").getAbsolutePath());
 
-        projJunction.show();
-        projDAPI.show();
-        projIF.show();
-        projMerged.show();
+        // ADDED: in batch mode, close all open image windows after saving —
+        // with many subfolders, leaving multiple image windows open per folder
+        // quickly clutters the workspace. In single-folder mode, leave them
+        // open as before so the user can inspect the result immediately.
+        if (closeInBatch) {
+            WindowManager.closeAllWindows();
+        } else {
+            projJunction.show();
+            projDAPI.show();
+            projIF.show();
+            projMerged.show();
+        }
 
         IJ.log("Saved projections to: " + saveFolder.getAbsolutePath());
         return true;
