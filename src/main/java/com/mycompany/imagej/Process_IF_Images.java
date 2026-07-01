@@ -166,10 +166,10 @@ public class Process_IF_Images implements PlugIn {
     		}
         
     	String newTitle = imp.getTitle();
-    	if (OneChannelConvertToRGB) {
+    	newTitle = newTitle.replaceFirst("^DUP_", "");
+    	if (OneChannelConvertToRGB) {	
     		newTitle = "RGB_" + newTitle;
     	}
-    	newTitle = newTitle.replaceFirst("^DUP_", "");
         newTitle = newTitle.replaceAll("[\\\\/:*?\"<>|]", "_");
         
 
