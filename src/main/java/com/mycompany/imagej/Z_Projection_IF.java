@@ -15,7 +15,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public class Max_Proj_IF implements PlugIn {
+public class Z_Projection_IF implements PlugIn {
 
     // Slice-range strategy the user picks in the options dialog. Each constant
     // carries its own dialog label, so there's one place to add/rename a mode
@@ -51,15 +51,65 @@ public class Max_Proj_IF implements PlugIn {
         }
     }
 
+    // Z-projection type. Each constant carries the ZProjector method code (the
+    // exact strings ZProjector.run(...) accepts — "avg", "max", "sd" — see
+    // ij.plugin.ZProjector docs) and the file-name prefix that reflects the actual
+    // projection performed, so the saved output is never mislabeled "MAX" when it's
+    // really an average or standard-deviation projection.
+    private enum ProjMethod {
+        MAXIMUM("Maximum Intensity", "max", "MAX"),
+        AVERAGE("Average Intensity", "avg", "AVG"),
+        SUM("Sum Intensity", "sum", "SUM"),
+        STD_DEV("Standard Deviation", "sd", "STD");
+
+        private final String label;
+        private final String zProjectorCode;
+        private final String filePrefix;
+
+        ProjMethod(String label, String zProjectorCode, String filePrefix) {
+            this.label = label;
+            this.zProjectorCode = zProjectorCode;
+            this.filePrefix = filePrefix;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
+
+        String code() {
+            return zProjectorCode;
+        }
+
+        String prefix() {
+            return filePrefix;
+        }
+
+        static String[] labels() {
+            ProjMethod[] values = values();
+            String[] out = new String[values.length];
+            for (int i = 0; i < values.length; i++) out[i] = values[i].label;
+            return out;
+        }
+
+        static ProjMethod fromLabel(String label) {
+            for (ProjMethod m : values()) {
+                if (m.label.equals(label)) return m;
+            }
+            throw new IllegalArgumentException("Unknown projection method: " + label);
+        }
+    }
+
     @Override
     public void run(String arg) {
         GenericDialog optGd = new GenericDialog("Projection Options");
-        optGd.addCheckbox("Batch mode (process all subfolders inside selected folder)", false);
-        optGd.addMessage(" ");
-        optGd.addCheckbox("Use Average projection  [default: Maximum]", false);
+        
+        optGd.addMessage("── Projection settings ────────────────");
+        optGd.addChoice("Projection method:", ProjMethod.labels(), ProjMethod.MAXIMUM.toString());
         optGd.addMessage("Maximum = standard for publication figures.\n"
-                + "Average = smoother appearance for diffuse markers,\n"
-                + "          reduces noise without clipping bright junctions.");
+                + "Average = smoother appearance for diffuse markers, reduces noise without clipping bright junctions.\n");
+        optGd.addMessage(" ");
+        optGd.addCheckbox("Batch mode (process all subfolders inside selected folder)", false);
         optGd.addMessage(" ");
         optGd.addChoice("Slice range:", RangeMode.labels(), RangeMode.MANUAL_VIEW.toString());
         optGd.addMessage("Whole stack = project every slice.\n"
@@ -74,11 +124,10 @@ public class Max_Proj_IF implements PlugIn {
         if (optGd.wasCanceled()) return;
 
         boolean batchMode = optGd.getNextBoolean();
-        boolean useAverage = optGd.getNextBoolean();
+        ProjMethod projMethod = ProjMethod.fromLabel(optGd.getNextChoice());
         RangeMode rangeMode = RangeMode.fromLabel(optGd.getNextChoice());
         boolean save8bit = optGd.getNextBoolean();
         boolean saveRGB = optGd.getNextBoolean();
-        String projMethod = useAverage ? "avg" : "max";
 
         DirectoryChooser dc = new DirectoryChooser(
                 batchMode ? "Select parent folder containing subfolders" : "Select image folder");
@@ -131,7 +180,7 @@ public class Max_Proj_IF implements PlugIn {
             else failures.add(label);
         }
 
-        showSummary(useAverage, rangeMode, successes, failures);
+        showSummary(projMethod, rangeMode, successes, failures);
     }
 
     // Manual-view mode: for every folder, opens that folder's own Junction image so
@@ -235,9 +284,9 @@ public class Max_Proj_IF implements PlugIn {
         return true;
     }
 
-    private void showSummary(boolean useAverage, RangeMode rangeMode, List<String> successes, List<String> failures) {
+    private void showSummary(ProjMethod projMethod, RangeMode rangeMode, List<String> successes, List<String> failures) {
         StringBuilder sb = new StringBuilder();
-        sb.append("Projection type : ").append(useAverage ? "Average" : "Maximum").append("\n");
+        sb.append("Projection type : ").append(projMethod).append("\n");
         sb.append("Slice range mode: ").append(rangeMode).append("\n\n");
 
         if (!successes.isEmpty()) {
@@ -266,14 +315,15 @@ public class Max_Proj_IF implements PlugIn {
         }
     }
 
-    // Builds a projection title that embeds the resolved slice range, so the range
-    // is visible in the saved file name (e.g. "MAX_S2-4_IF_SomeImage"). Strips any
-    // trailing image extension from the source title first — same cleanup
-    // Process_IF_Images.changeAndRenameChannel() does — so the ".tif" from the
-    // opened file doesn't end up duplicated in the saved output name.
-    private String titleWithRange(String prefix, String originalTitle, int[] range) {
+    // Builds a projection title that embeds the projection method's own prefix
+    // (MAX/AVG/STD — never hardcoded) and the resolved slice range, e.g.
+    // "AVG_S2-4_IF_SomeImage". Strips any trailing image extension from the source
+    // title first — same cleanup Process_IF_Images.changeAndRenameChannel() does —
+    // so the ".tif" from the opened file doesn't end up duplicated in the saved
+    // output name.
+    private String titleWithRange(ProjMethod projMethod, String originalTitle, int[] range) {
         String cleanTitle = originalTitle.replaceAll("(?i)\\.(tif|tiff|jpg|png)$", "");
-        return prefix + "_" + range[0] + "-" + range[1] + "_" + cleanTitle;
+        return projMethod.prefix() + "_" + range[0] + "-" + range[1] + "_" + cleanTitle;
     }
 
     // Saves a projection as a TIFF, optionally converting it to RGB first — mirrors
@@ -318,7 +368,7 @@ public class Max_Proj_IF implements PlugIn {
     // differing stack sizes between folders each get correct ranges rather than one
     // global range.
     private boolean processOneFolder(String dir, RangeMode rangeMode, int manualFirst, int manualLast,
-                                      String projMethod, boolean closeInBatch,
+                                      ProjMethod projMethod, boolean closeInBatch,
                                       boolean save8bit, boolean saveRGB) {
         File junctionFile = findFileByPrefix(new File(dir), "Junction_");
         if (junctionFile == null) {
@@ -333,15 +383,15 @@ public class Max_Proj_IF implements PlugIn {
         }
 
         int[] junctionRange = resolveSliceRange(rangeMode, impJunction.getStackSize(), manualFirst, manualLast);
-        ImagePlus projJunction = ZProjector.run(impJunction, projMethod, junctionRange[0], junctionRange[1]);
+        ImagePlus projJunction = ZProjector.run(impJunction, projMethod.code(), junctionRange[0], junctionRange[1]);
         if (projJunction == null) {
             IJ.log("Projection failed for Junction: " + junctionFile.getName());
             return false;
         }
-        projJunction.setTitle(titleWithRange("MAX", impJunction.getTitle(), junctionRange));
+        projJunction.setTitle(titleWithRange(projMethod, impJunction.getTitle(), junctionRange));
 
-        ImagePlus projDAPI = makeMaxProj(dir, "DAPI_", rangeMode, manualFirst, manualLast, projMethod);
-        ImagePlus projIF = makeMaxProj(dir, "IF_", rangeMode, manualFirst, manualLast, projMethod);
+        ImagePlus projDAPI = makeProjection(dir, "DAPI_", rangeMode, manualFirst, manualLast, projMethod);
+        ImagePlus projIF = makeProjection(dir, "IF_", rangeMode, manualFirst, manualLast, projMethod);
 
         if (projDAPI == null || projIF == null) {
             IJ.log("Failed to project DAPI or IF in: " + dir);
@@ -353,19 +403,19 @@ public class Max_Proj_IF implements PlugIn {
         // stays consistent with the saved, intensity-adjusted merge output. Treated
         // as critical, same as DAPI/IF, since the merged image is essential for
         // visualizing the data.
-        ImagePlus projMerged = makeMaxProj(dir, "Merged_", rangeMode, manualFirst, manualLast, projMethod);
+        ImagePlus projMerged = makeProjection(dir, "Merged_", rangeMode, manualFirst, manualLast, projMethod);
         if (projMerged == null) {
             IJ.log("Failed to project Merged image in: " + dir);
             return false;
         }
 
-        // Slice range is embedded in the "Max Projections" folder name (using the
+        // Slice range is embedded in the "Z Projections" folder name (using the
         // Junction channel's range as the folder's reference range) and in every
         // saved file name (using that image's own resolved range, via
         // titleWithRange), so ranges are traceable even if a channel's own stack
         // size ever differs from the Junction channel's.
         String folderSuffix = " (" + junctionRange[0] + "-" + junctionRange[1] + ")";
-        File saveFolder = new File(dir, "Max Projections" + folderSuffix);
+        File saveFolder = new File(dir, projMethod.prefix() + " PROJECTIONS" + folderSuffix);
         if (!saveFolder.exists()) saveFolder.mkdir();
 
         // The Junction/DAPI/IF projections are single-channel with a color LUT
@@ -403,7 +453,7 @@ public class Max_Proj_IF implements PlugIn {
     }
 
     // Finds the first image file in a folder whose name starts with the given
-    // prefix. Shared by run() and makeMaxProj() so the search logic isn't
+    // prefix. Shared by run() and makeProjection() so the search logic isn't
     // duplicated.
     private File findFileByPrefix(File folder, String prefix) {
         if (!folder.isDirectory()) return null;
@@ -424,21 +474,22 @@ public class Max_Proj_IF implements PlugIn {
     }
 
     // Original single-argument version kept for backwards compatibility —
-    // delegates to the new version with "max" as the default projection method.
-    // Takes fixed slice numbers rather than a range mode.
+    // delegates to the new version, always as a Maximum Intensity projection
+    // (matching its original, pre-refactor behavior). Takes fixed slice numbers
+    // rather than a range mode.
     @Deprecated
     public ImagePlus makeMaxProj(String dir, String searchStart, int firstSlice, int lastSlice) {
-        return makeMaxProj(dir, searchStart, RangeMode.MANUAL, firstSlice, lastSlice, "max");
+        return makeProjection(dir, searchStart, RangeMode.MANUAL, firstSlice, lastSlice, ProjMethod.MAXIMUM);
     }
 
     // Replaces blocking IJ.showMessage() calls with IJ.log() — a blocking dialog
     // inside a helper method would halt batch processing at every missing file.
     // Errors are collected in the log and shown in the summary at the end. Range
     // is resolved from THIS image's own stack size.
-    public ImagePlus makeMaxProj(String dir, String searchStart, RangeMode rangeMode,
-                                  int manualFirst, int manualLast, String projMethod) {
+    public ImagePlus makeProjection(String dir, String searchStart, RangeMode rangeMode,
+                                     int manualFirst, int manualLast, ProjMethod projMethod) {
         if (dir == null || searchStart == null) {
-            IJ.log("makeMaxProj: null directory or search string.");
+            IJ.log("makeProjection: null directory or search string.");
             return null;
         }
 
@@ -468,8 +519,8 @@ public class Max_Proj_IF implements PlugIn {
             return null;
         }
 
-        ImagePlus proj = ZProjector.run(imp, projMethod, firstSlice, lastSlice);
-        proj.setTitle(titleWithRange("MAX", imp.getTitle(), range));
+        ImagePlus proj = ZProjector.run(imp, projMethod.code(), firstSlice, lastSlice);
+        proj.setTitle(titleWithRange(projMethod, imp.getTitle(), range));
         return proj;
     }
 }
