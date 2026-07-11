@@ -14,7 +14,6 @@ import ij.IJ;
 import ij.plugin.RGBStackMerge;
 import ij.plugin.RGBStackConverter;
 import ij.process.LUT;
-import java.awt.image.IndexColorModel;
 import java.util.Arrays;
 
 
@@ -40,6 +39,7 @@ public class Process_IF_Images implements PlugIn {
 
     private static final String[] COLOR_OPTIONS = {"Red", "Green", "Blue", "Gray", "Cyan", "Magenta", "Yellow"};
 
+    @Override
     public void run(String arg) {
         int[] ids = WindowManager.getIDList();
 
@@ -141,29 +141,20 @@ public class Process_IF_Images implements PlugIn {
 
     private String saveImage(ImagePlus img, String dir, boolean OneChannelConvertToRGB) {
     	ImagePlus imp = img.duplicate();
+    	
     	if (OneChannelConvertToRGB) {
     		ImageStack oldStack = imp.getStack();
     	    int width = imp.getWidth();
     	    int height = imp.getHeight();
     	    int size = oldStack.getSize();
-
-    	    // 1. Create a fresh, empty container for the destination RGB processors
     	    ImageStack newStack = new ImageStack(width, height);
-
-    	    // 2. Iterate sequentially through every slice in your single-channel stack
     	    for (int i = 1; i <= size; i++) {
     	        ImageProcessor ip = oldStack.getProcessor(i);
-    	        
-    	        // Convert the current slice processor to an interleaved 24-bit ColorProcessor
     	        ColorProcessor cp = (ColorProcessor) ip.convertToRGB();
-    	        
-    	        // Append it using the original slice label string
     	        newStack.addSlice(oldStack.getSliceLabel(i), cp);
     	    }
-
-    	    // 3. Swap the old single-channel memory heap out for the new RGB layout stack
     	    imp.setStack(newStack);
-    		}
+    	}
         
     	String newTitle = imp.getTitle();
     	newTitle = newTitle.replaceFirst("^DUP_", "");
@@ -171,7 +162,6 @@ public class Process_IF_Images implements PlugIn {
     		newTitle = "RGB_" + newTitle;
     	}
         newTitle = newTitle.replaceAll("[\\\\/:*?\"<>|]", "_");
-        
 
         File outputFile = new File(dir, newTitle + ".tif");
         FileSaver fs = new FileSaver(imp);
@@ -187,6 +177,7 @@ public class Process_IF_Images implements PlugIn {
     private boolean splitImage(ImagePlus imp, String dir) {
         String imageTitle = imp.getTitle();
         int nChannels = imp.getNChannels();
+        
         if (nChannels < 3) {
             IJ.showMessage("Error", imageTitle + " does not have at least 3 channels.");
             return false;
@@ -210,12 +201,9 @@ public class Process_IF_Images implements PlugIn {
 
         ImagePlus[] channels = ChannelSplitter.split(imp);
 
-        ImagePlus plaIm = changeAndRenameChannel(channels, IFChannel,
-                                   imp.getTitle(), "IF",       IFMin,       IFMax);
-        ImagePlus dapiIm = changeAndRenameChannel(channels, dapiChannel,
-                                   imp.getTitle(), "DAPI",     dapiMin,     dapiMax);
-        ImagePlus junctionIm = changeAndRenameChannel(channels, junctionChannel,
-                                   imp.getTitle(), "Junction", junctionMin, junctionMax);
+        ImagePlus plaIm = changeAndRenameChannel(channels, IFChannel, imp.getTitle(), "IF", IFMin, IFMax);
+        ImagePlus dapiIm = changeAndRenameChannel(channels, dapiChannel, imp.getTitle(), "DAPI", dapiMin, dapiMax);
+        ImagePlus junctionIm = changeAndRenameChannel(channels, junctionChannel, imp.getTitle(), "Junction", junctionMin, junctionMax);
 
         applyLut(plaIm, IFColor);
         applyLut(junctionIm, junctionColor);
@@ -233,9 +221,7 @@ public class Process_IF_Images implements PlugIn {
         	saveImage(junctionIm, dir, true);
         }
 
-        ImagePlus[] mergeInput = buildMergeInput(plaIm, IFColor,
-                                                  junctionIm, junctionColor,
-                                                  dapiIm, dapiColor);
+        ImagePlus[] mergeInput = buildMergeInput(plaIm, IFColor, junctionIm, junctionColor, dapiIm, dapiColor);
 
         ImagePlus merged = RGBStackMerge.mergeChannels(mergeInput, false);
 
@@ -283,8 +269,8 @@ public class Process_IF_Images implements PlugIn {
     
 
     private ImagePlus[] buildMergeInput(ImagePlus im1, String color1,
-                                         ImagePlus im2, String color2,
-                                         ImagePlus im3, String color3) {
+                                        ImagePlus im2, String color2,
+                                        ImagePlus im3, String color3) {
         ImagePlus[] slots = new ImagePlus[7]; // red, green, blue, gray, cyan, magenta, yellow
         placeInSlot(slots, im1, color1);
         placeInSlot(slots, im2, color2);
@@ -300,26 +286,37 @@ public class Process_IF_Images implements PlugIn {
         slots[idx] = imp;
     }
 
-
     private ImagePlus changeAndRenameChannel(ImagePlus[] channels, int chIndex,
                                               String baseTitle, String label,
                                               int minNum, int maxNum) {
         ImagePlus ch = channels[chIndex - 1];
         ImageStack stack = ch.getStack();
         ImageStack rescaledStack = new ImageStack(stack.getWidth(), stack.getHeight());
-
+        
         for (int slice = 1; slice <= stack.getSize(); slice++) {
-            ImageProcessor sliceIp = stack.getProcessor(slice);
-            sliceIp.setMinAndMax(minNum, maxNum);
-            ImageProcessor byteIp = sliceIp.convertToByte(true);
-            rescaledStack.addSlice(stack.getSliceLabel(slice), byteIp);
+        	ImageProcessor sliceIp = stack.getProcessor(slice);
+            int[] lut = new int[256];
+            for (int i = 0; i < 256; i++) {
+                if (i <= minNum) {
+                    lut[i] = 0;
+                } else if (i >= maxNum) {
+                    lut[i] = 255;
+                } else {
+                    lut[i] = (int) (((double)(i - minNum) / (maxNum - minNum)) * 255.0);
+                }
+            }
+            sliceIp.applyTable(lut);
+            sliceIp.setMinAndMax(0, 255);
+            
+            rescaledStack.addSlice(stack.getSliceLabel(slice), sliceIp.duplicate());
         }
+
 
         ch.setStack(rescaledStack);
 
         String cleanTitle = baseTitle.replaceAll("(?i)\\.(tif|tiff|jpg|png)$", "");
         
-        ch.setTitle(label + "_" + cleanTitle);
+        ch.setTitle(label + "_" + minNum + "-" + maxNum + "_" + cleanTitle);
         return ch;
     }
 }

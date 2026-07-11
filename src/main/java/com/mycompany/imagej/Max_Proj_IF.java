@@ -1,68 +1,96 @@
 package com.mycompany.imagej; //change here and pom.xml
 
-import ij.IJ;
-import ij.ImagePlus;
-import ij.ImageStack;
-import ij.WindowManager;
+import ij.*;
+import ij.io.DirectoryChooser;
+import ij.io.FileSaver;
+import ij.gui.GenericDialog;
 import ij.gui.NonBlockingGenericDialog;
 import ij.plugin.PlugIn;
 import ij.plugin.ZProjector;
-import ij.io.DirectoryChooser;
+import ij.process.ColorProcessor;
+import ij.process.ImageProcessor;
 import java.io.File;
-
-import ij.gui.GenericDialog; //additional imports
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class Max_Proj_IF implements PlugIn {
 
-    private static final String RANGE_WHOLE  = "Whole stack";
-    private static final String RANGE_MIDDLE = "Middle 3 slices";
-    private static final String RANGE_MANUAL = "Manually select range (view reference image)";
-    private static final String[] RANGE_MODES = {RANGE_WHOLE, RANGE_MIDDLE, RANGE_MANUAL};
+    // Slice-range strategy the user picks in the options dialog. Each constant
+    // carries its own dialog label, so there's one place to add/rename a mode
+    // instead of a separate String constant plus a manually-maintained array.
+    private enum RangeMode {
+        MANUAL_VIEW("Manually select range (view reference image)"),
+        MANUAL("Manually select range (input all upfront)"),
+        WHOLE("Whole stack");
+
+        private final String label;
+
+        RangeMode(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
+
+        static String[] labels() {
+            RangeMode[] values = values();
+            String[] out = new String[values.length];
+            for (int i = 0; i < values.length; i++) out[i] = values[i].label;
+            return out;
+        }
+
+        static RangeMode fromLabel(String label) {
+            for (RangeMode m : values()) {
+                if (m.label.equals(label)) return m;
+            }
+            throw new IllegalArgumentException("Unknown range mode: " + label);
+        }
+    }
 
     @Override
     public void run(String arg) {
-
-        // ── Step 1: options dialog ────────────────────────────────────────────
-        // ADDED: ask for projection type and single vs batch mode before anything else
         GenericDialog optGd = new GenericDialog("Projection Options");
         optGd.addCheckbox("Batch mode (process all subfolders inside selected folder)", false);
         optGd.addMessage(" ");
         optGd.addCheckbox("Use Average projection  [default: Maximum]", false);
         optGd.addMessage("Maximum = standard for publication figures.\n"
-                       + "Average = smoother appearance for diffuse markers,\n"
-                       + "          reduces noise without clipping bright junctions.");
+                + "Average = smoother appearance for diffuse markers,\n"
+                + "          reduces noise without clipping bright junctions.");
         optGd.addMessage(" ");
-        // ADDED: slice-range mode replaces always-manual entry. "Middle 3 slices"
-        // is resolved per-folder (each folder's own stack size), so batch runs
-        // with varying stack sizes between folders each get correct middle slices.
-        optGd.addChoice("Slice range:", RANGE_MODES, RANGE_WHOLE);
+        optGd.addChoice("Slice range:", RangeMode.labels(), RangeMode.MANUAL_VIEW.toString());
         optGd.addMessage("Whole stack = project every slice.\n"
-                       + "Middle 3 slices = each folder's own middle 3 (stack-size/2 -1 .. +1).\n"
-                       + "Manual = scroll a reference image to pick one range for all folders.");
+                + "Manual (view reference) = scroll a reference image, per folder, to pick its range.\n"
+                + "Manual (input upfront) = enter slice ranges directly, before any processing.");
+        optGd.addMessage(" ");
+        optGd.addMessage("── Saving settings ────────────────");
+        optGd.addCheckbox("Save 8-bit images for analysis", true);
+        optGd.addCheckbox("Save RGB images for visualization", false);
         optGd.showDialog();
+
         if (optGd.wasCanceled()) return;
 
-        boolean batchMode  = optGd.getNextBoolean();
+        boolean batchMode = optGd.getNextBoolean();
         boolean useAverage = optGd.getNextBoolean();
-        String  rangeMode  = optGd.getNextChoice();
-        // ZProjector method string — "avg" or "max"
-        String projMethod  = useAverage ? "avg" : "max";
+        RangeMode rangeMode = RangeMode.fromLabel(optGd.getNextChoice());
+        boolean save8bit = optGd.getNextBoolean();
+        boolean saveRGB = optGd.getNextBoolean();
+        String projMethod = useAverage ? "avg" : "max";
 
-        // ── Step 2: directory selection ──────────────────────────────────────
         DirectoryChooser dc = new DirectoryChooser(
                 batchMode ? "Select parent folder containing subfolders" : "Select image folder");
         String dir = dc.getDirectory();
+
         if (dir == null) {
             IJ.showMessage("No folder selected.");
             return;
         }
 
-        // ── Step 3: build list of folders to process ─────────────────────────
         List<File> foldersToProcess = new ArrayList<>();
         if (batchMode) {
-            // Collect all immediate subfolders of the selected parent
             File[] subdirs = new File(dir).listFiles(File::isDirectory);
             if (subdirs != null) {
                 for (File sd : subdirs) foldersToProcess.add(sd);
@@ -75,91 +103,143 @@ public class Max_Proj_IF implements PlugIn {
             foldersToProcess.add(new File(dir));
         }
 
-        // ── Step 4: slice selection ───────────────────────────────────────────
-        // AMENDED: manual reference-image viewing (scrolling the Junction stack
-        // to find the apical junctional complex) now only happens when the user
-        // picked "Manual" slice-range mode. For "Whole stack" and "Middle 3
-        // slices" there's nothing to look at or decide globally — those modes
-        // are resolved per-folder in processOneFolder(), using each folder's own
-        // image's stack size, which matters for "Middle 3" when stack sizes
-        // differ between subfolders in batch mode.
-        int firstSlice = -1; // -1 = "resolve per folder" sentinel
-        int lastSlice  = -1;
+        // Slice ranges are resolved upfront, per folder, for the two manual modes.
+        // "Whole stack" needs no upfront range — it's resolved per-image from each
+        // stack's own size inside processOneFolder. In single-folder mode, both
+        // collection methods below naturally run their prompt exactly once, since
+        // foldersToProcess has only one entry.
+        Map<File, int[]> folderRanges = new HashMap<>();
+        if (rangeMode == RangeMode.MANUAL_VIEW) {
+            if (!collectManualViewRanges(foldersToProcess, folderRanges)) return;
+        } else if (rangeMode == RangeMode.MANUAL) {
+            if (!collectManualInputRanges(foldersToProcess, batchMode, folderRanges)) return;
+        }
 
-        if (rangeMode.equals(RANGE_MANUAL)) {
-            // Find a Junction_ image in the first valid folder so the user can see
-            // exactly where the apical junctional complex sits in the z-stack.
-            // AMENDED: the same slice range is applied to ALL folders in batch mode,
-            // ensuring consistent z-position across conditions.
-            File referenceJunction = null;
-            for (File folder : foldersToProcess) {
-                referenceJunction = findFileByPrefix(folder, "Junction_");
-                if (referenceJunction != null) break;
+        List<String> successes = new ArrayList<>();
+        List<String> failures = new ArrayList<>();
+
+        for (File folder : foldersToProcess) {
+            int[] range = folderRanges.getOrDefault(folder, new int[]{-1, -1});
+            boolean ok = processOneFolder(folder.getAbsolutePath(), rangeMode,
+                    range[0], range[1], projMethod, batchMode, save8bit, saveRGB);
+
+            String label = folder.getName();
+            if (range[0] > 0 && range[1] > 0) {
+                label += " (" + range[0] + "-" + range[1] + ")";
             }
-            if (referenceJunction == null) {
-                IJ.showMessage("No image starting with 'Junction_' found in any folder.");
-                return;
+            if (ok) successes.add(label);
+            else failures.add(label);
+        }
+
+        showSummary(useAverage, rangeMode, successes, failures);
+    }
+
+    // Manual-view mode: for every folder, opens that folder's own Junction image so
+    // the user can scroll to the apical junctional complex and pick a range specific
+    // to that folder. Returns false (aborting the whole run) if the user cancels.
+    private boolean collectManualViewRanges(List<File> folders, Map<File, int[]> outRanges) {
+        for (File folder : folders) {
+            File junctionFile = findFileByPrefix(folder, "Junction_");
+            if (junctionFile == null) {
+                IJ.log("Skipping range selection — no Junction_ file found in: " + folder.getAbsolutePath());
+                continue;
             }
 
-            ImagePlus refImp = IJ.openImage(referenceJunction.getAbsolutePath());
+            ImagePlus refImp = IJ.openImage(junctionFile.getAbsolutePath());
             if (refImp == null) {
-                IJ.showMessage("Failed to open reference Junction image.");
-                return;
+                IJ.log("Failed to open reference Junction image in: " + folder.getAbsolutePath());
+                continue;
             }
             refImp.show();
 
             int stackSize = refImp.getStackSize();
             if (stackSize < 2) {
-                IJ.showMessage("Junction image does not have multiple slices to project.");
+                IJ.log("Junction image does not have multiple slices in: " + folder.getAbsolutePath());
                 refImp.close();
-                return;
+                continue;
             }
 
-            NonBlockingGenericDialog gd = new NonBlockingGenericDialog("Select Z-Range for Projection");
-            gd.addMessage("Junction image is shown for reference.\n"
-                        + "Scroll through slices to find where E-cadherin junctions\n"
-                        + "are sharpest (apical junctional complex).");
+            NonBlockingGenericDialog gd = new NonBlockingGenericDialog("Select Z-Range — " + folder.getName());
+            gd.addMessage("Folder: " + folder.getName() + "\n"
+                    + "Junction image is shown for reference.\n"
+                    + "Scroll through slices to find where E-cadherin junctions\n"
+                    + "are sharpest (apical junctional complex).");
             gd.addNumericField("First slice (>= 1):", 1, 0);
             gd.addNumericField("Last slice  (<= " + stackSize + "):", stackSize, 0);
-            if (batchMode) {
-                gd.addMessage("This range will be applied to ALL " + foldersToProcess.size() + " subfolders.");
-            }
             gd.showDialog();
+
             if (gd.wasCanceled()) {
                 refImp.close();
-                return;
+                return false;
             }
 
-            firstSlice = Math.max(1,         (int) gd.getNextNumber());
-            lastSlice  = Math.min(stackSize, (int) gd.getNextNumber());
-            if (firstSlice > lastSlice) {
-                IJ.showMessage("First slice must be less than or equal to last slice.");
-                refImp.close();
-                return;
-            }
+            int first = Math.max(1, (int) gd.getNextNumber());
+            int last = Math.min(stackSize, (int) gd.getNextNumber());
             refImp.close();
+
+            if (first > last) {
+                IJ.showMessage("First slice must be less than or equal to last slice for: " + folder.getName());
+                return false;
+            }
+
+            outRanges.put(folder, new int[]{first, last});
+        }
+        return true;
+    }
+
+    // Manual-input mode: in single-folder mode, a simple one-off first/last dialog.
+    // In batch mode, a single dialog lists first/last fields for every folder in
+    // order, plus a checkbox to apply one shared range to all folders instead.
+    // Returns false (aborting the whole run) if the user cancels.
+    private boolean collectManualInputRanges(List<File> folders, boolean batchMode, Map<File, int[]> outRanges) {
+        if (!batchMode) {
+            File folder = folders.get(0);
+            GenericDialog gd = new GenericDialog("Manual Slice Range");
+            gd.addMessage("Folder: " + folder.getName());
+            gd.addNumericField("First slice:", 1, 0);
+            gd.addNumericField("Last slice:", 1, 0);
+            gd.showDialog();
+
+            if (gd.wasCanceled()) return false;
+
+            int first = (int) gd.getNextNumber();
+            int last = (int) gd.getNextNumber();
+            outRanges.put(folder, new int[]{first, last});
+            return true;
         }
 
-        // ── Step 5: process each folder ──────────────────────────────────────
-        List<String> successes = new ArrayList<>();
-        List<String> failures  = new ArrayList<>();
-
-        for (File folder : foldersToProcess) {
-            boolean ok = processOneFolder(folder.getAbsolutePath(), rangeMode,
-                                           firstSlice, lastSlice, projMethod, batchMode);
-            if (ok) successes.add(folder.getName());
-            else    failures.add(folder.getName());
+        GenericDialog gd = new GenericDialog("Manual Slice Ranges (Batch)");
+        gd.addCheckbox("Use the same slice range for all folders", false);
+        gd.addMessage("If checked, only the 'All folders' fields below are used.");
+        gd.addNumericField("All folders - First slice:", 1, 0);
+        gd.addNumericField("All folders - Last slice:", 1, 0);
+        gd.addMessage(" ");
+        gd.addMessage("Per-folder ranges (used when the box above is unchecked):");
+        for (File folder : folders) {
+            gd.addNumericField(folder.getName() + " - First slice:", 1, 0);
+            gd.addNumericField(folder.getName() + " - Last slice:", 1, 0);
         }
+        gd.showDialog();
 
-        // ── Step 6: summary report ───────────────────────────────────────────
-        // AMENDED: single summary dialog instead of one blocking popup per folder
+        if (gd.wasCanceled()) return false;
+
+        boolean useSameForAll = gd.getNextBoolean();
+        int allFirst = (int) gd.getNextNumber();
+        int allLast = (int) gd.getNextNumber();
+
+        for (File folder : folders) {
+            int first = (int) gd.getNextNumber();
+            int last = (int) gd.getNextNumber();
+            outRanges.put(folder, useSameForAll ? new int[]{allFirst, allLast} : new int[]{first, last});
+        }
+        return true;
+    }
+
+    private void showSummary(boolean useAverage, RangeMode rangeMode, List<String> successes, List<String> failures) {
         StringBuilder sb = new StringBuilder();
         sb.append("Projection type : ").append(useAverage ? "Average" : "Maximum").append("\n");
-        sb.append("Slice range     : ").append(rangeMode);
-        if (rangeMode.equals(RANGE_MANUAL)) {
-            sb.append(" (").append(firstSlice).append(" to ").append(lastSlice).append(")");
-        }
-        sb.append("\n\n");
+        sb.append("Slice range mode: ").append(rangeMode).append("\n\n");
+
         if (!successes.isEmpty()) {
             sb.append("Completed (").append(successes.size()).append("):\n");
             for (String s : successes) sb.append("  \u2713 ").append(s).append("\n");
@@ -172,40 +252,74 @@ public class Max_Proj_IF implements PlugIn {
         IJ.showMessage("Processing complete", sb.toString());
     }
 
-    // ADDED: resolves the actual [firstSlice, lastSlice] to use for a given
-    // stack size and range mode. For Manual mode the caller already has fixed
-    // values from the reference-image dialog, passed straight through here.
-    // For Whole stack: 1..stackSize. For Middle 3: the 3 central slices,
-    // clamped so it still works sensibly on stacks smaller than 3 slices.
-    private int[] resolveSliceRange(String rangeMode, int stackSize,
-                                     int manualFirst, int manualLast) {
-        if (rangeMode.equals(RANGE_WHOLE)) {
+    // Resolves the [firstSlice, lastSlice] to use for a given stack size and range
+    // mode. Both manual modes pass the folder's already-collected values straight
+    // through (clamped to the actual stack size); whole-stack mode projects every
+    // slice.
+    private int[] resolveSliceRange(RangeMode rangeMode, int stackSize, int manualFirst, int manualLast) {
+        if (rangeMode == RangeMode.WHOLE) {
             return new int[]{1, stackSize};
-        } else if (rangeMode.equals(RANGE_MIDDLE)) {
-            int mid = (stackSize + 1) / 2; // central slice, 1-based
-            int first = mid - 1;
-            int last  = mid + 1;
-            if (first < 1) first = 1;
-            if (last > stackSize) last = stackSize;
-            return new int[]{first, last};
-        } else { // RANGE_MANUAL
+        } else {
             int first = Math.max(1, manualFirst);
-            int last  = Math.min(stackSize, manualLast);
+            int last = Math.min(stackSize, manualLast);
             return new int[]{first, last};
         }
     }
 
-    // ── ADDED: processes a single folder — called once per folder in both single
-    // and batch mode so the logic is never duplicated ────────────────────────
-    // AMENDED: now takes rangeMode instead of fixed slice numbers. For
-    // "Whole stack" and "Middle 3 slices", the actual range is resolved here
-    // from each image's own stack size — so batch runs with differing stack
-    // sizes between folders (or even between channels within a folder) each
-    // get correct, independently-computed ranges rather than one global range.
-    private boolean processOneFolder(String dir, String rangeMode,
-                                      int manualFirst, int manualLast, String projMethod,
-                                      boolean closeInBatch) {
+    // Builds a projection title that embeds the resolved slice range, so the range
+    // is visible in the saved file name (e.g. "MAX_S2-4_IF_SomeImage"). Strips any
+    // trailing image extension from the source title first — same cleanup
+    // Process_IF_Images.changeAndRenameChannel() does — so the ".tif" from the
+    // opened file doesn't end up duplicated in the saved output name.
+    private String titleWithRange(String prefix, String originalTitle, int[] range) {
+        String cleanTitle = originalTitle.replaceAll("(?i)\\.(tif|tiff|jpg|png)$", "");
+        return prefix + "_" + range[0] + "-" + range[1] + "_" + cleanTitle;
+    }
 
+    // Saves a projection as a TIFF, optionally converting it to RGB first — mirrors
+    // Process_IF_Images.saveImage(). Single-channel projections carry a color LUT
+    // rather than real RGB pixels; convertToRGB bakes that LUT color into the pixel
+    // data itself, per slice, and prefixes the file name with "RGB_".
+    private void saveProjection(ImagePlus img, String dir, boolean convertToRGB) {
+        ImagePlus imp = img.duplicate();
+
+        if (convertToRGB) {
+            ImageStack oldStack = imp.getStack();
+            int width = imp.getWidth();
+            int height = imp.getHeight();
+            int size = oldStack.getSize();
+            ImageStack newStack = new ImageStack(width, height);
+            for (int i = 1; i <= size; i++) {
+                ImageProcessor ip = oldStack.getProcessor(i);
+                ColorProcessor cp = (ColorProcessor) ip.convertToRGB();
+                newStack.addSlice(oldStack.getSliceLabel(i), cp);
+            }
+            imp.setStack(newStack);
+        }
+
+        String title = imp.getTitle().replaceFirst("^DUP_", "");
+        if (convertToRGB) {
+            title = "RGB_" + title;
+        }
+        title = title.replaceAll("[\\\\/:*?\"<>|]", "_");
+
+        File outputFile = new File(dir, title + ".tif");
+        boolean success = new FileSaver(imp).saveAsTiff(outputFile.getAbsolutePath());
+        if (!success) {
+            IJ.log("Failed to save: " + outputFile.getAbsolutePath());
+        } else {
+            IJ.log("Saved: " + outputFile.getAbsolutePath());
+        }
+    }
+
+    // Processes a single folder — called once per folder in both single and batch
+    // mode so the logic is never duplicated. For whole-stack mode, the actual range
+    // is resolved here from each image's own stack size, so batch runs with
+    // differing stack sizes between folders each get correct ranges rather than one
+    // global range.
+    private boolean processOneFolder(String dir, RangeMode rangeMode, int manualFirst, int manualLast,
+                                      String projMethod, boolean closeInBatch,
+                                      boolean save8bit, boolean saveRGB) {
         File junctionFile = findFileByPrefix(new File(dir), "Junction_");
         if (junctionFile == null) {
             IJ.log("Skipped — no Junction_ file found in: " + dir);
@@ -218,49 +332,63 @@ public class Max_Proj_IF implements PlugIn {
             return false;
         }
 
-        int[] junctionRange = resolveSliceRange(rangeMode, impJunction.getStackSize(),
-                                                 manualFirst, manualLast);
-        ImagePlus projJunction = ZProjector.run(impJunction, projMethod,
-                                                 junctionRange[0], junctionRange[1]);
+        int[] junctionRange = resolveSliceRange(rangeMode, impJunction.getStackSize(), manualFirst, manualLast);
+        ImagePlus projJunction = ZProjector.run(impJunction, projMethod, junctionRange[0], junctionRange[1]);
         if (projJunction == null) {
             IJ.log("Projection failed for Junction: " + junctionFile.getName());
             return false;
         }
-        projJunction.setTitle("MAX" + impJunction.getTitle());
+        projJunction.setTitle(titleWithRange("MAX", impJunction.getTitle(), junctionRange));
 
         ImagePlus projDAPI = makeMaxProj(dir, "DAPI_", rangeMode, manualFirst, manualLast, projMethod);
-        ImagePlus projIF   = makeMaxProj(dir, "IF_",   rangeMode, manualFirst, manualLast, projMethod);
+        ImagePlus projIF = makeMaxProj(dir, "IF_", rangeMode, manualFirst, manualLast, projMethod);
 
         if (projDAPI == null || projIF == null) {
             IJ.log("Failed to project DAPI or IF in: " + dir);
             return false;
         }
 
-        // ADDED: project the merged RGB composite too. This is done by running
-        // ZProjector directly on the already-merged "Merged_*" TIFF rather than
-        // re-merging the projected channels, so it stays consistent with the
-        // saved, intensity-adjusted merge output. Treated as critical, same as
-        // DAPI/IF — a missing or failed merged projection fails the whole
-        // folder, since the merged image is essential for visualizing the data.
+        // Projects the merged RGB composite directly from the already-merged
+        // "Merged_*" TIFF, rather than re-merging the projected channels, so it
+        // stays consistent with the saved, intensity-adjusted merge output. Treated
+        // as critical, same as DAPI/IF, since the merged image is essential for
+        // visualizing the data.
         ImagePlus projMerged = makeMaxProj(dir, "Merged_", rangeMode, manualFirst, manualLast, projMethod);
         if (projMerged == null) {
             IJ.log("Failed to project Merged image in: " + dir);
             return false;
         }
 
-        // Save to "Max Projections" subfolder — same as original behaviour
-        File saveFolder = new File(dir, "Max Projections");
+        // Slice range is embedded in the "Max Projections" folder name (using the
+        // Junction channel's range as the folder's reference range) and in every
+        // saved file name (using that image's own resolved range, via
+        // titleWithRange), so ranges are traceable even if a channel's own stack
+        // size ever differs from the Junction channel's.
+        String folderSuffix = " (" + junctionRange[0] + "-" + junctionRange[1] + ")";
+        File saveFolder = new File(dir, "Max Projections" + folderSuffix);
         if (!saveFolder.exists()) saveFolder.mkdir();
 
-        IJ.saveAsTiff(projJunction, new File(saveFolder, projJunction.getShortTitle() + ".tif").getAbsolutePath());
-        IJ.saveAsTiff(projDAPI,     new File(saveFolder, projDAPI.getShortTitle()     + ".tif").getAbsolutePath());
-        IJ.saveAsTiff(projIF,       new File(saveFolder, projIF.getShortTitle()       + ".tif").getAbsolutePath());
-        IJ.saveAsTiff(projMerged,   new File(saveFolder, projMerged.getShortTitle()   + ".tif").getAbsolutePath());
+        // The Junction/DAPI/IF projections are single-channel with a color LUT
+        // attached (inherited from Process_IF_Images). "8-bit" saves them as-is;
+        // "RGB" bakes the LUT color into real RGB pixels first, same as
+        // Process_IF_Images does for its split channels. Merged is already an RGB
+        // composite, so it's always saved once regardless of these checkboxes.
+        if (save8bit) {
+            saveProjection(projJunction, saveFolder.getAbsolutePath(), false);
+            saveProjection(projDAPI, saveFolder.getAbsolutePath(), false);
+            saveProjection(projIF, saveFolder.getAbsolutePath(), false);
+        }
+        if (saveRGB) {
+            saveProjection(projJunction, saveFolder.getAbsolutePath(), true);
+            saveProjection(projDAPI, saveFolder.getAbsolutePath(), true);
+            saveProjection(projIF, saveFolder.getAbsolutePath(), true);
+        }
+        saveProjection(projMerged, saveFolder.getAbsolutePath(), false);
 
-        // ADDED: in batch mode, close all open image windows after saving —
-        // with many subfolders, leaving multiple image windows open per folder
-        // quickly clutters the workspace. In single-folder mode, leave them
-        // open as before so the user can inspect the result immediately.
+        // In batch mode, close all open image windows after saving — with many
+        // subfolders, leaving multiple windows open per folder quickly clutters the
+        // workspace. In single-folder mode, leave them open so the user can inspect
+        // the result immediately.
         if (closeInBatch) {
             WindowManager.closeAllWindows();
         } else {
@@ -274,18 +402,20 @@ public class Max_Proj_IF implements PlugIn {
         return true;
     }
 
-    // ── ADDED: finds the first image file in a folder whose name starts with
-    // the given prefix. Eliminates the duplicate file-search loops that existed
-    // in run() and makeMaxProj() ──────────────────────────────────────────────
+    // Finds the first image file in a folder whose name starts with the given
+    // prefix. Shared by run() and makeMaxProj() so the search logic isn't
+    // duplicated.
     private File findFileByPrefix(File folder, String prefix) {
         if (!folder.isDirectory()) return null;
+
         File[] files = folder.listFiles();
         if (files == null) return null;
+
         for (File f : files) {
             if (f.isFile() && f.getName().startsWith(prefix)) {
                 String name = f.getName().toLowerCase();
                 if (name.endsWith(".tif") || name.endsWith(".tiff") ||
-                    name.endsWith(".jpg") || name.endsWith(".png")) {
+                        name.endsWith(".jpg") || name.endsWith(".png")) {
                     return f;
                 }
             }
@@ -294,31 +424,25 @@ public class Max_Proj_IF implements PlugIn {
     }
 
     // Original single-argument version kept for backwards compatibility —
-    // delegates to the new version with "max" as default projection method.
-    // DEPRECATED: takes fixed slice numbers rather than a range mode, so
-    // "Middle 3 slices" can't be resolved per-image through this entry point.
+    // delegates to the new version with "max" as the default projection method.
+    // Takes fixed slice numbers rather than a range mode.
     @Deprecated
     public ImagePlus makeMaxProj(String dir, String searchStart, int firstSlice, int lastSlice) {
-        return makeMaxProj(dir, searchStart, RANGE_MANUAL, firstSlice, lastSlice, "max");
+        return makeMaxProj(dir, searchStart, RangeMode.MANUAL, firstSlice, lastSlice, "max");
     }
 
-    // AMENDED: added projMethod parameter so caller controls max vs average.
-    // Replaced all IJ.showMessage() calls with IJ.log() — blocking dialogs
-    // inside a helper method halt batch processing at every missing file.
-    // Errors are collected in the log and shown in the summary at the end.
-    // AMENDED: now takes rangeMode + manualFirst/manualLast instead of fixed
-    // firstSlice/lastSlice, so "Whole stack" and "Middle 3 slices" are resolved
-    // from THIS image's own stack size.
-    public ImagePlus makeMaxProj(String dir, String searchStart, String rangeMode,
+    // Replaces blocking IJ.showMessage() calls with IJ.log() — a blocking dialog
+    // inside a helper method would halt batch processing at every missing file.
+    // Errors are collected in the log and shown in the summary at the end. Range
+    // is resolved from THIS image's own stack size.
+    public ImagePlus makeMaxProj(String dir, String searchStart, RangeMode rangeMode,
                                   int manualFirst, int manualLast, String projMethod) {
         if (dir == null || searchStart == null) {
             IJ.log("makeMaxProj: null directory or search string.");
             return null;
         }
 
-        // AMENDED: use findFileByPrefix() instead of duplicating the search loop
         File targetFile = findFileByPrefix(new File(dir), searchStart);
-
         if (targetFile == null) {
             IJ.log("No image starting with '" + searchStart + "' found in: " + dir);
             return null;
@@ -338,14 +462,14 @@ public class Max_Proj_IF implements PlugIn {
 
         int[] range = resolveSliceRange(rangeMode, stackSize, manualFirst, manualLast);
         int firstSlice = range[0];
-        int lastSlice  = range[1];
+        int lastSlice = range[1];
         if (firstSlice > lastSlice) {
             IJ.log("Invalid slice range for: " + targetFile.getName());
             return null;
         }
 
         ImagePlus proj = ZProjector.run(imp, projMethod, firstSlice, lastSlice);
-        proj.setTitle("MAX" + imp.getTitle());
+        proj.setTitle(titleWithRange("MAX", imp.getTitle(), range));
         return proj;
     }
 }
