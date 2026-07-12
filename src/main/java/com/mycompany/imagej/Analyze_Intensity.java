@@ -62,9 +62,9 @@ public class Analyze_Intensity implements PlugIn {
         int defaultDAPI = 0, defaultJunction = 0, defaultPOI = 0;
         for (int i = 0; i < fileList.length; i++) {
             String name = fileList[i];
-            if (name.contains("DAPI_") && defaultDAPI == 0) defaultDAPI = i;
-            if (name.contains("Junction_") && defaultJunction == 0) defaultJunction = i;
-            if (name.contains("POI_") && defaultPOI == 0) defaultPOI = i;
+            if (name.contains("DAPI_") && (!name.contains("RGB")) && defaultDAPI == 0) defaultDAPI = i;
+            if (name.contains("Junction_") && (!name.contains("RGB")) && defaultJunction == 0) defaultJunction = i;
+            if (name.contains("POI_") && (!name.contains("RGB")) && defaultPOI == 0) defaultPOI = i;
         }
 
         GenericDialog gdAssign = new GenericDialog("Select Images");
@@ -108,12 +108,23 @@ public class Analyze_Intensity implements PlugIn {
             gdThresh.addMessage("Choose how each mask's threshold should be determined.");
             gdThresh.addChoice("Junction mask thresholding:", thresholdModes, thresholdModes[0]);
             gdThresh.addChoice("Nuclear mask thresholding:", thresholdModes, thresholdModes[0]);
+            gdThresh.addMessage("Optional mask cleanup:\n"
+                    + "Set to 0 to skip.");
+            gdThresh.addNumericField("Junction mask - Dilation/erosion size to close holes:", 0, 0);
+            gdThresh.addNumericField("Junction mask - Erosion/dilation size to remove small, isolated dots:", 0, 0);
+            gdThresh.addNumericField("Nuclear mask - Dilation/erosion size to close holes:", 0, 0);
+            gdThresh.addNumericField("Nuclear mask - Erosion/dilation size to remove small, isolated noise:", 0, 0);
             gdThresh.showDialog();
             if (gdThresh.wasCanceled()) return;
             boolean manualJunction = gdThresh.getNextChoice().equals("Manual");
             boolean manualNuclear = gdThresh.getNextChoice().equals("Manual");
+            int junctionCloseIterations = (int) gdThresh.getNextNumber();
+            int junctionOpenIterations = (int) gdThresh.getNextNumber();
+            int nuclearCloseIterations = (int) gdThresh.getNextNumber();
+            int nuclearOpenIterations = (int) gdThresh.getNextNumber();
 
-            runMethod1JunctionalThreshold(dapiImp, ecadImp, poiImp, dir, manualJunction, manualNuclear);
+            runMethod1JunctionalThreshold(dapiImp, ecadImp, poiImp, dir, manualJunction, manualNuclear, 
+            		junctionCloseIterations, junctionOpenIterations, nuclearCloseIterations, nuclearOpenIterations);
         } else {
             runMethod2SixMicronLine(poiImp);
         }
@@ -125,7 +136,9 @@ public class Analyze_Intensity implements PlugIn {
     // METHOD 1: Junctional Threshold (+ Nuclear / Cytoplasmic compartments)
     // =====================================================================================
     private void runMethod1JunctionalThreshold(ImagePlus dapiImp, ImagePlus ecadImp, ImagePlus poiImp, String dir,
-                                                boolean manualJunction, boolean manualNuclear) {
+                                                boolean manualJunction, boolean manualNuclear,
+                                                int junctionCloseIterations, int junctionOpenIterations,
+                                                int nuclearCloseIterations, int nuclearOpenIterations) {
 
         // ---- Junction mask from the Ecad image ------------------------------------------
         ImagePlus junctionMaskImp = manualJunction
@@ -135,6 +148,7 @@ public class Analyze_Intensity implements PlugIn {
             IJ.error("Fluorescence Junction Analyzer", "Junction mask creation was cancelled or failed.");
             return;
         }
+        applyErosionDilation(junctionMaskImp, junctionCloseIterations, junctionOpenIterations); 
 
         Roi junctionRoi = ThresholdToSelection.run(junctionMaskImp);
         if (junctionRoi == null) {
@@ -155,6 +169,7 @@ public class Analyze_Intensity implements PlugIn {
                 : createMaskFromImageAuto(dapiImp, "Huang dark", "NuclearMask", true);
         double[] nuclear = new double[]{0, 0, 0, 0};
         if (nuclearMaskImp != null) {
+            applyErosionDilation(nuclearMaskImp, nuclearCloseIterations, nuclearOpenIterations);
             Roi nuclearRoi = ThresholdToSelection.run(nuclearMaskImp);
             if (nuclearRoi != null) {
                 poiImp.setRoi((Roi) nuclearRoi.clone());
@@ -232,6 +247,24 @@ public class Analyze_Intensity implements PlugIn {
         summary.addValue("Background Mean", background[3]);
         summary.addValue("Junctional/Cytoplasmic (Mean)", jcRatio);
         summary.addValue("Junctional/Nuclear (Mean)", jnRatio);
+    }
+
+    /**
+     * Applies binary erosion followed by dilation to the given mask, using the
+     * requested iteration counts. Eroding first removes small isolated dots/noise;
+     * dilating afterward restores the size of the structures that survived. Either
+     * count can be 0 to skip that step.
+     */
+    private void applyErosionDilation(ImagePlus mask, int closeIterations, int openIterations) {
+        Prefs.blackBackground = true;
+        if (closeIterations > 0) {
+        	IJ.run(mask, "Dilate", "iterations=" + closeIterations + " count=1");
+        	IJ.run(mask, "Erode", "iterations=" + closeIterations + " count=1");
+        }
+        if (openIterations > 0) {
+            IJ.run(mask, "Erode", "iterations=" + openIterations + " count=1");
+            IJ.run(mask, "Dilate", "iterations=" + openIterations + " count=1");
+        }
     }
 
     /**
@@ -358,10 +391,10 @@ public class Analyze_Intensity implements PlugIn {
         ArrayList<String> roiTypeLabels = new ArrayList<>();
 
         for (int rep = 1; rep <= 3; rep++) {
-            captureCalibratedLine(imp, rm, "JUNCTIONAL line (repeat " + rep + " of 3)", LINE_LENGTH_UM);
+            captureCalibratedLine(imp, rm, "junctional line (repeat " + rep + " of 3)", LINE_LENGTH_UM);
             roiTypeLabels.add("POI");
 
-            captureCalibratedLine(imp, rm, "BACKGROUND line (repeat " + rep + " of 3)", LINE_LENGTH_UM);
+            captureCalibratedLine(imp, rm, "background line (repeat " + rep + " of 3)", LINE_LENGTH_UM);
             roiTypeLabels.add("Background");
         }
 

@@ -34,9 +34,18 @@ public class Combine_Analysis_Summaries implements PlugIn {
         List<String> missing = new ArrayList<>();
         Map<String, File> csvFiles = new TreeMap<>();
         for (File subdir : subdirs) {
-            File maxProjFolder = new File(subdir, "Max Projections");
+        	File maxProjFolder = null;
+        	File[] files = subdir.listFiles();
+        	if (files != null) {
+        	    for (File f : files) {
+        	        if (f.isDirectory() && f.getName().contains(" PROJECTIONS")) {
+        	            maxProjFolder = f;
+        	            break;
+        	        }
+        	    }
+        	}
             if (!maxProjFolder.isDirectory()) {
-                missing.add(subdir.getName() + " (missing 'Max Projections')");
+                missing.add(subdir.getName() + " (missing Projections)");
                 continue;
             }
 
