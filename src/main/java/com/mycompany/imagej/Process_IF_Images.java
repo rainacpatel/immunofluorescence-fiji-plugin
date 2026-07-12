@@ -20,10 +20,10 @@ import java.util.Arrays;
 
 public class Process_IF_Images implements PlugIn {
 
-    private int IFChannel;
-    private int IFMin;
-    private int IFMax;
-    private String IFColor;
+    private int POIChannel;
+    private int POIMin;
+    private int POIMax;
+    private String POIColor;
     private int junctionChannel;
     private int junctionMin;
     private int junctionMax;
@@ -54,8 +54,8 @@ public class Process_IF_Images implements PlugIn {
         // Get user input for channel, display range, and saving settings
         GenericDialog gd = new GenericDialog("Select Channels & Display Range");
         gd.addMessage("── Channel assignment (1 to " + nChannels + ") ──────────────────");
-        gd.addNumericField("Protein / IF channel:", 1, 0);
-        gd.addChoice("IF color:", COLOR_OPTIONS, "Red");
+        gd.addNumericField("Protein of Interest (POI) channel:", 1, 0);
+        gd.addChoice("POI color:", COLOR_OPTIONS, "Red");
         gd.addNumericField("Junction channel:", 2, 0);
         gd.addChoice("Junction color:", COLOR_OPTIONS, "Green");
         gd.addNumericField("DAPI channel:", 3, 0);
@@ -64,8 +64,8 @@ public class Process_IF_Images implements PlugIn {
         gd.addMessage(" ");
         gd.addMessage("── Display range — applied to ALL images ────────────────");
         gd.addMessage("Set Min/Max to match your acquisition bit depth (8-bit = 0-255).");
-        gd.addSlider("IF Min",       0, 255,    0);
-        gd.addSlider("IF Max",       0, 255, 255);
+        gd.addSlider("POI Min",       0, 255,    0);
+        gd.addSlider("POI Max",       0, 255, 255);
         gd.addSlider("Junction Min", 0, 255,    0);
         gd.addSlider("Junction Max", 0, 255, 255);
         gd.addSlider("DAPI Min",     0, 255,    0);
@@ -81,14 +81,14 @@ public class Process_IF_Images implements PlugIn {
         if (gd.wasCanceled()) return;
 
         // 
-        IFChannel       = (int) gd.getNextNumber();
-        IFColor         = gd.getNextChoice();
+        POIChannel       = (int) gd.getNextNumber();
+        POIColor         = gd.getNextChoice();
         junctionChannel = (int) gd.getNextNumber();
         junctionColor   = gd.getNextChoice();
         dapiChannel     = (int) gd.getNextNumber();
         dapiColor       = gd.getNextChoice();
-        IFMin           = (int) gd.getNextNumber();
-        IFMax           = (int) gd.getNextNumber();
+        POIMin           = (int) gd.getNextNumber();
+        POIMax           = (int) gd.getNextNumber();
         junctionMin     = (int) gd.getNextNumber();
         junctionMax     = (int) gd.getNextNumber();
         dapiMin         = (int) gd.getNextNumber();
@@ -182,18 +182,18 @@ public class Process_IF_Images implements PlugIn {
             IJ.showMessage("Error", imageTitle + " does not have at least 3 channels.");
             return false;
         }
-        if (!isValidChannel(IFChannel, nChannels) ||
+        if (!isValidChannel(POIChannel, nChannels) ||
                 !isValidChannel(dapiChannel, nChannels) ||
                 !isValidChannel(junctionChannel, nChannels)) {
             IJ.showMessage("Error", imageTitle + ": One or more channel numbers are invalid.");
             return false;
         }
-        if (IFChannel == dapiChannel || IFChannel == junctionChannel
+        if (POIChannel == dapiChannel || POIChannel == junctionChannel
                 || dapiChannel == junctionChannel) {
             IJ.showMessage("Error", imageTitle + ": Each channel must be unique.");
             return false;
         }
-        if (IFColor.equals(dapiColor) || IFColor.equals(junctionColor)
+        if (POIColor.equals(dapiColor) || POIColor.equals(junctionColor)
                 || dapiColor.equals(junctionColor)) {
             IJ.showMessage("Error", imageTitle + ": Each channel must have a unique color.");
             return false;
@@ -201,27 +201,27 @@ public class Process_IF_Images implements PlugIn {
 
         ImagePlus[] channels = ChannelSplitter.split(imp);
 
-        ImagePlus plaIm = changeAndRenameChannel(channels, IFChannel, imp.getTitle(), "IF", IFMin, IFMax);
+        ImagePlus poiIm = changeAndRenameChannel(channels, POIChannel, imp.getTitle(), "POI", POIMin, POIMax);
         ImagePlus dapiIm = changeAndRenameChannel(channels, dapiChannel, imp.getTitle(), "DAPI", dapiMin, dapiMax);
         ImagePlus junctionIm = changeAndRenameChannel(channels, junctionChannel, imp.getTitle(), "Junction", junctionMin, junctionMax);
 
-        applyLut(plaIm, IFColor);
+        applyLut(poiIm, POIColor);
         applyLut(junctionIm, junctionColor);
         applyLut(dapiIm, dapiColor);
         
         if (save8bit) {
-        	saveImage(plaIm, dir, false);
+        	saveImage(poiIm, dir, false);
         	saveImage(dapiIm, dir, false);
         	saveImage(junctionIm, dir, false);        	
         }
         
         if (saveRGB) {
-        	saveImage(plaIm, dir, true);
+        	saveImage(poiIm, dir, true);
         	saveImage(dapiIm, dir, true);
         	saveImage(junctionIm, dir, true);
         }
 
-        ImagePlus[] mergeInput = buildMergeInput(plaIm, IFColor, junctionIm, junctionColor, dapiIm, dapiColor);
+        ImagePlus[] mergeInput = buildMergeInput(poiIm, POIColor, junctionIm, junctionColor, dapiIm, dapiColor);
 
         ImagePlus merged = RGBStackMerge.mergeChannels(mergeInput, false);
 

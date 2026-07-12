@@ -391,10 +391,10 @@ public class Z_Projection_IF implements PlugIn {
         projJunction.setTitle(titleWithRange(projMethod, impJunction.getTitle(), junctionRange));
 
         ImagePlus projDAPI = makeProjection(dir, "DAPI_", rangeMode, manualFirst, manualLast, projMethod);
-        ImagePlus projIF = makeProjection(dir, "IF_", rangeMode, manualFirst, manualLast, projMethod);
+        ImagePlus projPOI = makeProjection(dir, "POI_", rangeMode, manualFirst, manualLast, projMethod);
 
-        if (projDAPI == null || projIF == null) {
-            IJ.log("Failed to project DAPI or IF in: " + dir);
+        if (projDAPI == null || projPOI == null) {
+            IJ.log("Failed to project DAPI or POI in: " + dir);
             return false;
         }
 
@@ -426,12 +426,12 @@ public class Z_Projection_IF implements PlugIn {
         if (save8bit) {
             saveProjection(projJunction, saveFolder.getAbsolutePath(), false);
             saveProjection(projDAPI, saveFolder.getAbsolutePath(), false);
-            saveProjection(projIF, saveFolder.getAbsolutePath(), false);
+            saveProjection(projPOI, saveFolder.getAbsolutePath(), false);
         }
         if (saveRGB) {
             saveProjection(projJunction, saveFolder.getAbsolutePath(), true);
             saveProjection(projDAPI, saveFolder.getAbsolutePath(), true);
-            saveProjection(projIF, saveFolder.getAbsolutePath(), true);
+            saveProjection(projPOI, saveFolder.getAbsolutePath(), true);
         }
         saveProjection(projMerged, saveFolder.getAbsolutePath(), false);
 
@@ -444,7 +444,7 @@ public class Z_Projection_IF implements PlugIn {
         } else {
             projJunction.show();
             projDAPI.show();
-            projIF.show();
+            projPOI.show();
             projMerged.show();
         }
 
