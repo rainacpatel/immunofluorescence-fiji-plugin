@@ -38,6 +38,10 @@ public class Analyze_Intensity implements PlugIn {
     /** Exact area, in calibrated units^2, for the Method 1 background circle. */
     private static final double BACKGROUND_CIRCLE_AREA = 39.136;
 
+    /** pick your sampling width */
+    
+    private static final double LINE_WIDTH_PIXELS = 1.0; 
+
     // Analysis method the user picks in the options dialog. Each constant carries
     // its own dialog label so there's one place to add/rename a method.
     private enum AnalysisMethod {
@@ -663,33 +667,42 @@ public class Analyze_Intensity implements PlugIn {
     // Rescales a Line ROI already in the ROI Manager to an exact calibrated length,
     // using the image's pixel calibration, keeping the line's midpoint and angle
     // unchanged.
-    private void adjustLineLength(ImagePlus imp, RoiManager rm, int index, double lengthUm) {
+private void adjustLineLength(ImagePlus imp, RoiManager rm, int index, double lengthUm) {
         rm.select(imp, index);
         Roi roi = imp.getRoi();
         if (!(roi instanceof Line)) return;
 
         Line line = (Line) roi;
         Calibration cal = imp.getCalibration();
-        double pixelSize = (cal != null && cal.pixelWidth > 0) ? cal.pixelWidth : 1.0;
-        double targetLengthPixels = lengthUm / pixelSize;
+        double pixelWidth = (cal != null && cal.pixelWidth > 0) ? cal.pixelWidth : 1.0;
+        double pixelHeight = (cal != null && cal.pixelHeight > 0) ? cal.pixelHeight : 1.0;
 
         double x1 = line.x1d, y1 = line.y1d, x2 = line.x2d, y2 = line.y2d;
         double midX = (x1 + x2) / 2.0;
         double midY = (y1 + y2) / 2.0;
         double dx = x2 - x1;
         double dy = y2 - y1;
-        double currentLength = Math.sqrt(dx * dx + dy * dy);
 
-        if (currentLength == 0) {
+        // Convert the line vector into calibrated (real-world) space so the
+        // rescale is exact even if pixelWidth != pixelHeight.
+        double dxUm = dx * pixelWidth;
+        double dyUm = dy * pixelHeight;
+        double currentLengthUm = Math.sqrt(dxUm * dxUm + dyUm * dyUm);
+
+        if (currentLengthUm == 0) {
             IJ.error("Fluorescence Junction Analyzer", "The drawn line has zero length.");
             return;
         }
 
-        double scale = targetLengthPixels / currentLength;
-        double newX1 = midX - (dx / 2.0) * scale;
-        double newY1 = midY - (dy / 2.0) * scale;
-        double newX2 = midX + (dx / 2.0) * scale;
-        double newY2 = midY + (dy / 2.0) * scale;
+        double scale = lengthUm / currentLengthUm;
+        double newDxUm = dxUm * scale;
+        double newDyUm = dyUm * scale;
+
+        // Convert back to pixel space per-axis.
+        double newX1 = midX - (newDxUm / pixelWidth) / 2.0;
+        double newY1 = midY - (newDyUm / pixelHeight) / 2.0;
+        double newX2 = midX + (newDxUm / pixelWidth) / 2.0;
+        double newY2 = midY + (newDyUm / pixelHeight) / 2.0;
 
         // IMPORTANT: do NOT call rm.select(index) here — that would re-fetch the
         // original, un-resized line from the manager and redraw it on the image,
@@ -697,8 +710,9 @@ public class Analyze_Intensity implements PlugIn {
         // ROI is currently on imp into the still-selected manager slot from the
         // rm.select(imp, index) call at the top of this method, so just set the
         // resized line on imp and update — no reselection needed.
-        imp.setRoi(new Line(newX1, newY1, newX2, newY2));
-        rm.runCommand("Update");
+        Line newLine = new Line(newX1, newY1, newX2, newY2);
+        newLine.setStrokeWidth(LINE_WIDTH_PIXELS);
+        imp.setRoi(newLine);
     }
 
     // =====================================================================================
