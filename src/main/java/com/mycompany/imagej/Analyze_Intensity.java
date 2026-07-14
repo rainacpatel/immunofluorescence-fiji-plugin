@@ -2,6 +2,7 @@ package com.mycompany.imagej; //change here and pom.xml
 
 import ij.IJ;
 import ij.ImagePlus;
+import ij.WindowManager;
 import ij.gui.DialogListener;
 import ij.gui.GenericDialog;
 import ij.gui.Line;
@@ -27,26 +28,227 @@ import java.awt.AWTEvent;
 import java.awt.Color;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.List;
 
 public class Analyze_Intensity implements PlugIn {
 
-    /** Target length, in micrometers, for Method 2 junctional/background lines. */
-    private static final double LINE_LENGTH_UM = 6.0;
+    /** Default line length, in micrometers, offered in the Method 2 options dialog. */
+    private static final double DEFAULT_LINE_LENGTH_UM = 6.0;
 
     /** Exact area, in calibrated units^2, for the Method 1 background circle. */
     private static final double BACKGROUND_CIRCLE_AREA = 39.136;
 
-    private final ResultsTable summary = new ResultsTable();
+    // Analysis method the user picks in the options dialog. Each constant carries
+    // its own dialog label so there's one place to add/rename a method.
+    private enum AnalysisMethod {
+        METHOD1_THRESHOLD("Method 1: Junctional Threshold Mask"),
+        METHOD2_LINE("Method 2: Manual Line");
+
+        private final String label;
+
+        AnalysisMethod(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
+
+        static String[] labels() {
+            AnalysisMethod[] values = values();
+            String[] out = new String[values.length];
+            for (int i = 0; i < values.length; i++) out[i] = values[i].label;
+            return out;
+        }
+
+        static AnalysisMethod fromLabel(String label) {
+            for (AnalysisMethod m : values()) {
+                if (m.label.equals(label)) return m;
+            }
+            throw new IllegalArgumentException("Unknown method: " + label);
+        }
+    }
+
+    // Bundles the Method 1 mask-cleanup dialog answers, gathered once upfront and
+    // reused for every folder, instead of threading six parameters through calls.
+    private static class ThresholdOptions {
+        final boolean manualJunction;
+        final boolean manualNuclear;
+        final int junctionCloseIterations;
+        final int junctionOpenIterations;
+        final int nuclearCloseIterations;
+        final int nuclearOpenIterations;
+
+        ThresholdOptions(boolean manualJunction, boolean manualNuclear,
+                          int junctionCloseIterations, int junctionOpenIterations,
+                          int nuclearCloseIterations, int nuclearOpenIterations) {
+            this.manualJunction = manualJunction;
+            this.manualNuclear = manualNuclear;
+            this.junctionCloseIterations = junctionCloseIterations;
+            this.junctionOpenIterations = junctionOpenIterations;
+            this.nuclearCloseIterations = nuclearCloseIterations;
+            this.nuclearOpenIterations = nuclearOpenIterations;
+        }
+    }
 
     @Override
     public void run(String arg) {
 
-        // ---- Step 1: choose directory and assign images ---------------------------------
-        DirectoryChooser dc = new DirectoryChooser("Choose Image Directory");
+        // ---- Step 1: method + batch mode ----------------------------------------------
+        GenericDialog optGd = new GenericDialog("Analysis Options");
+        optGd.addChoice("Method:", AnalysisMethod.labels(), AnalysisMethod.METHOD1_THRESHOLD.toString());
+        optGd.addNumericField("Method 2 - Line length (micrometers):", DEFAULT_LINE_LENGTH_UM, 2);
+        optGd.addMessage("(Line length is ignored for Method 1.)");
+        optGd.addMessage(" ");
+        optGd.addCheckbox("Batch mode (process all subfolders inside selected folder)", false);
+        optGd.showDialog();
+        if (optGd.wasCanceled()) return;
+
+        AnalysisMethod method = AnalysisMethod.fromLabel(optGd.getNextChoice());
+        double lineLengthUm = optGd.getNextNumber();
+        boolean batchMode = optGd.getNextBoolean();
+
+        if (method == AnalysisMethod.METHOD2_LINE && lineLengthUm <= 0) {
+            IJ.error("Fluorescence Junction Analyzer", "Line length must be greater than 0.");
+            return;
+        }
+
+        // Gathered once upfront and reused for every folder, instead of
+        // re-prompting per folder in batch mode.
+        ThresholdOptions threshOpts = null;
+        if (method == AnalysisMethod.METHOD1_THRESHOLD) {
+            threshOpts = collectThresholdOptions();
+            if (threshOpts == null) return; // cancelled
+        }
+
+        // Not strictly required since we measure via ImageStatistics directly, but
+        // keeps Analyze > Measure in sync if the user checks anything manually.
+        IJ.run("Set Measurements...", "area mean integrated redirect=None decimal=3");
+
+        // ---- Step 2: choose folder(s) ---------------------------------------------------
+        DirectoryChooser dc = new DirectoryChooser(
+                batchMode ? "Select parent folder containing subfolders" : "Select image folder");
         String dir = dc.getDirectory();
         if (dir == null) return; // user cancelled
 
-        File folder = new File(dir);
+        List<File> foldersToProcess = new ArrayList<>();
+        if (batchMode) {
+            File[] subdirs = new File(dir).listFiles(File::isDirectory);
+            if (subdirs != null) {
+                for (File sd : subdirs) foldersToProcess.add(sd);
+            }
+            if (foldersToProcess.isEmpty()) {
+                IJ.showMessage("No subfolders found in the selected folder.");
+                return;
+            }
+        } else {
+            foldersToProcess.add(new File(dir));
+        }
+
+        // ---- Step 3: process each folder -------------------------------------------------
+        List<String> successes = new ArrayList<>();
+        List<String> failures = new ArrayList<>();
+
+        for (File folder : foldersToProcess) {
+            boolean ok = processOneFolder(folder, method, threshOpts, lineLengthUm, batchMode);
+            if (ok) successes.add(folder.getName());
+            else failures.add(folder.getName());
+        }
+
+        if (batchMode) {
+            showBatchSummary(method, successes, failures);
+        }
+    }
+
+    // Locates/opens the images, runs the selected method, and saves the summary
+    // for one folder. Called once per folder in both single and batch mode.
+    private boolean processOneFolder(File folder, AnalysisMethod method, ThresholdOptions threshOpts,
+                                      double lineLengthUm, boolean batchMode) {
+        ImagePlus dapiImp, ecadImp, poiImp;
+        File imageDir;
+
+        if (batchMode) {
+            File projFolder = findProjectionsFolder(folder);
+            if (projFolder == null) {
+                IJ.log("Skipped " + folder.getName() + " — no '* PROJECTIONS' folder found.");
+                return false;
+            }
+            File dapiFile = null;
+            File ecadFile = null;
+            File poiFile = null;
+
+            int defaultDAPI = 0;
+            int defaultECAD = 0;
+            int defaultPOI = 0;
+
+            for (File file : projFolder.listFiles()) {
+                String name = file.getName();
+
+                if (name.contains("DAPI_") && !name.contains("RGB") && !name.contains("overlay") && defaultDAPI == 0) {
+                    dapiFile = file;
+                    defaultDAPI = 1;
+                }
+
+                if (name.contains("Junction_") && !name.contains("RGB") && !name.contains("overlay") && defaultECAD == 0) {
+                    ecadFile = file;
+                    defaultECAD = 1;
+                }
+
+                if (name.contains("POI_") && !name.contains("RGB") && !name.contains("overlay") && defaultPOI == 0) {
+                    poiFile = file;
+                    defaultPOI = 1;
+                }
+            }
+            
+            if (dapiFile == null || ecadFile == null || poiFile == null) {
+                IJ.log("Skipped " + folder.getName() + " — missing DAPI_/Junction_/POI_ image in: " + projFolder.getName());
+                return false;
+            }
+            dapiImp = IJ.openImage(dapiFile.getAbsolutePath());
+            ecadImp = IJ.openImage(ecadFile.getAbsolutePath());
+            poiImp = IJ.openImage(poiFile.getAbsolutePath());
+            imageDir = projFolder;
+        } else {
+            String[] selection = promptForImages(folder);
+            if (selection == null) return false; // cancelled or no images found
+            dapiImp = IJ.openImage(new File(folder, selection[0]).getAbsolutePath());
+            ecadImp = IJ.openImage(new File(folder, selection[1]).getAbsolutePath());
+            poiImp = IJ.openImage(new File(folder, selection[2]).getAbsolutePath());
+            imageDir = folder;
+        }
+
+        if (dapiImp == null || ecadImp == null || poiImp == null) {
+            IJ.log("Skipped " + folder.getName() + " — one or more images could not be opened.");
+            return false;
+        }
+        dapiImp.hide();
+        ecadImp.hide();
+        poiImp.hide();
+
+        ResultsTable folderSummary = new ResultsTable();
+        if (method == AnalysisMethod.METHOD1_THRESHOLD) {
+            runMethod1JunctionalThreshold(dapiImp, ecadImp, poiImp, imageDir.getAbsolutePath(), threshOpts, folderSummary);
+        } else {
+            runMethod2SixMicronLine(poiImp, folderSummary, lineLengthUm);
+        }
+
+        String baseFileName = summaryBaseFileName(method, lineLengthUm);
+        boolean saved = saveSummary(folderSummary, imageDir.getAbsolutePath(), baseFileName, batchMode);
+
+        // Close windows after each folder in batch mode to avoid clutter; leave
+        // them open in single-folder mode.
+        if (batchMode) {
+            WindowManager.closeAllWindows();
+        }
+
+        return saved;
+    }
+
+    // Single-folder mode: lets the user assign DAPI/Junction/POI from dropdowns,
+    // defaulting each to the first file matching its naming convention. Returns
+    // {dapiFile, ecadFile, poiFile} names, or null if cancelled/no images found.
+    private String[] promptForImages(File folder) {
         String[] fileList = folder.list((d, name) -> {
             String lname = name.toLowerCase();
             return lname.endsWith(".tif") || lname.endsWith(".tiff") ||
@@ -55,10 +257,9 @@ public class Analyze_Intensity implements PlugIn {
 
         if (fileList == null || fileList.length == 0) {
             IJ.error("Fluorescence Junction Analyzer", "No image files found in the directory.");
-            return;
+            return null;
         }
 
-        // defaults, guessed from filename conventions
         int defaultDAPI = 0, defaultJunction = 0, defaultPOI = 0;
         for (int i = 0; i < fileList.length; i++) {
             String name = fileList[i];
@@ -67,88 +268,105 @@ public class Analyze_Intensity implements PlugIn {
             if (name.contains("POI_") && (!name.contains("RGB")) && defaultPOI == 0) defaultPOI = i;
         }
 
-        GenericDialog gdAssign = new GenericDialog("Select Images");
-        gdAssign.addChoice("DAPI image:", fileList, fileList[defaultDAPI]);
-        gdAssign.addChoice("Junction (E-cadherin) image:", fileList, fileList[defaultJunction]);
-        gdAssign.addChoice("Protein of Interest image:", fileList, fileList[defaultPOI]);
-        gdAssign.showDialog();
-        if (gdAssign.wasCanceled()) return;
+        GenericDialog gd = new GenericDialog("Select Images — " + folder.getName());
+        gd.addChoice("DAPI image:", fileList, fileList[defaultDAPI]);
+        gd.addChoice("Junction (E-cadherin) image:", fileList, fileList[defaultJunction]);
+        gd.addChoice("Protein of Interest image:", fileList, fileList[defaultPOI]);
+        gd.showDialog();
+        if (gd.wasCanceled()) return null;
 
-        String dapiFile = gdAssign.getNextChoice();
-        String ecadFile = gdAssign.getNextChoice();
-        String poiFile = gdAssign.getNextChoice();
+        return new String[]{gd.getNextChoice(), gd.getNextChoice(), gd.getNextChoice()};
+    }
 
-        ImagePlus dapiImp = IJ.openImage(dir + dapiFile);
-        ImagePlus ecadImp = IJ.openImage(dir + ecadFile);
-        ImagePlus poiImp = IJ.openImage(dir + poiFile);
-        if (dapiImp == null || ecadImp == null || poiImp == null) {
-            IJ.error("Fluorescence Junction Analyzer", "One or more images could not be opened.");
-            return;
+    // Finds the first child directory whose name contains " PROJECTIONS" — the
+    // naming convention from Z_Projection_IF, also used by Combine_Analysis_Summaries.
+    private File findProjectionsFolder(File folder) {
+        File[] files = folder.listFiles();
+        if (files == null) return null;
+        for (File f : files) {
+            if (f.isDirectory() && f.getName().contains(" PROJECTIONS")) return f;
         }
-        dapiImp.hide();
-        ecadImp.hide();
-        poiImp.hide();
+        return null;
+    }
 
-        // ---- Step 2: pick method --------------------------------------------------------
-        String[] methods = {"Method 1: Junctional Threshold", "Method 2: 6 um Line"};
-        GenericDialog gdMethod = new GenericDialog("Select Analysis Method");
-        gdMethod.addChoice("Method:", methods, methods[0]);
-        gdMethod.showDialog();
-        if (gdMethod.wasCanceled()) return;
-        String method = gdMethod.getNextChoice();
 
-        // Ensure consistent global measurement settings (not strictly required since
-        // we measure via ImageStatistics directly, but keeps Analyze > Measure in sync
-        // if the user checks anything manually).
-        IJ.run("Set Measurements...", "area mean integrated redirect=None decimal=3");
+    private ThresholdOptions collectThresholdOptions() {
+        String[] thresholdModes = {"Automatic", "Manual"};
+        GenericDialog gdThresh = new GenericDialog("Mask Threshold Options");
+        gdThresh.addMessage("Choose how each mask's threshold should be determined.");
+        gdThresh.addChoice("Junction mask thresholding:", thresholdModes, thresholdModes[0]);
+        gdThresh.addChoice("Nuclear mask thresholding:", thresholdModes, thresholdModes[0]);
+        gdThresh.addMessage("Optional mask cleanup:\nSet to 0 to skip.");
+        gdThresh.addNumericField("Junction mask - Dilation/erosion size to close holes:", 0, 0);
+        gdThresh.addNumericField("Junction mask - Erosion/dilation size to remove small, isolated dots:", 0, 0);
+        gdThresh.addNumericField("Nuclear mask - Dilation/erosion size to close holes:", 0, 0);
+        gdThresh.addNumericField("Nuclear mask - Erosion/dilation size to remove small, isolated noise:", 0, 0);
+        gdThresh.showDialog();
+        if (gdThresh.wasCanceled()) return null;
 
-        if (method.equals(methods[0])) {
-            String[] thresholdModes = {"Automatic", "Manual"};
-            GenericDialog gdThresh = new GenericDialog("Mask Threshold Options");
-            gdThresh.addMessage("Choose how each mask's threshold should be determined.");
-            gdThresh.addChoice("Junction mask thresholding:", thresholdModes, thresholdModes[0]);
-            gdThresh.addChoice("Nuclear mask thresholding:", thresholdModes, thresholdModes[0]);
-            gdThresh.addMessage("Optional mask cleanup:\n"
-                    + "Set to 0 to skip.");
-            gdThresh.addNumericField("Junction mask - Dilation/erosion size to close holes:", 0, 0);
-            gdThresh.addNumericField("Junction mask - Erosion/dilation size to remove small, isolated dots:", 0, 0);
-            gdThresh.addNumericField("Nuclear mask - Dilation/erosion size to close holes:", 0, 0);
-            gdThresh.addNumericField("Nuclear mask - Erosion/dilation size to remove small, isolated noise:", 0, 0);
-            gdThresh.showDialog();
-            if (gdThresh.wasCanceled()) return;
-            boolean manualJunction = gdThresh.getNextChoice().equals("Manual");
-            boolean manualNuclear = gdThresh.getNextChoice().equals("Manual");
-            int junctionCloseIterations = (int) gdThresh.getNextNumber();
-            int junctionOpenIterations = (int) gdThresh.getNextNumber();
-            int nuclearCloseIterations = (int) gdThresh.getNextNumber();
-            int nuclearOpenIterations = (int) gdThresh.getNextNumber();
+        boolean manualJunction = gdThresh.getNextChoice().equals("Manual");
+        boolean manualNuclear = gdThresh.getNextChoice().equals("Manual");
+        int junctionCloseIterations = (int) gdThresh.getNextNumber();
+        int junctionOpenIterations = (int) gdThresh.getNextNumber();
+        int nuclearCloseIterations = (int) gdThresh.getNextNumber();
+        int nuclearOpenIterations = (int) gdThresh.getNextNumber();
 
-            runMethod1JunctionalThreshold(dapiImp, ecadImp, poiImp, dir, manualJunction, manualNuclear, 
-            		junctionCloseIterations, junctionOpenIterations, nuclearCloseIterations, nuclearOpenIterations);
+        return new ThresholdOptions(manualJunction, manualNuclear,
+                junctionCloseIterations, junctionOpenIterations,
+                nuclearCloseIterations, nuclearOpenIterations);
+    }
+
+    // Base output filename (no extension), specific to the method — and, for
+    // Method 2, the line length — so different settings never overwrite each
+    // other and Combine_Analysis_Summaries.java can target one set at a time.
+    private String summaryBaseFileName(AnalysisMethod method, double lineLengthUm) {
+        if (method == AnalysisMethod.METHOD1_THRESHOLD) {
+            return "analysis_summary_method1";
         } else {
-            runMethod2SixMicronLine(poiImp);
+            return "analysis_summary_method2_" + formatLength(lineLengthUm) + "um";
         }
+    }
 
-        saveSummaryDialog(dir);
+    // Formats a line length without a trailing ".0" for whole numbers (e.g. 6 not
+    // 6.0), so filenames stay tidy for the common case.
+    private String formatLength(double value) {
+        if (value == Math.floor(value) && !Double.isInfinite(value)) {
+            return String.valueOf((long) value);
+        }
+        return String.valueOf(value);
+    }
+
+    private void showBatchSummary(AnalysisMethod method, List<String> successes, List<String> failures) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Method: ").append(method).append("\n\n");
+
+        if (!successes.isEmpty()) {
+            sb.append("Completed (").append(successes.size()).append("):\n");
+            for (String s : successes) sb.append("  \u2713 ").append(s).append("\n");
+        }
+        if (!failures.isEmpty()) {
+            sb.append("\nSkipped/failed (").append(failures.size()).append("):\n");
+            for (String f : failures) sb.append("  \u2717 ").append(f).append("\n");
+            sb.append("\nSee Fiji Log window for details.");
+        }
+        IJ.showMessage("Batch analysis complete", sb.toString());
     }
 
     // =====================================================================================
     // METHOD 1: Junctional Threshold (+ Nuclear / Cytoplasmic compartments)
     // =====================================================================================
     private void runMethod1JunctionalThreshold(ImagePlus dapiImp, ImagePlus ecadImp, ImagePlus poiImp, String dir,
-                                                boolean manualJunction, boolean manualNuclear,
-                                                int junctionCloseIterations, int junctionOpenIterations,
-                                                int nuclearCloseIterations, int nuclearOpenIterations) {
+                                                ThresholdOptions opts, ResultsTable table) {
 
         // ---- Junction mask from the Ecad image ------------------------------------------
-        ImagePlus junctionMaskImp = manualJunction
+        ImagePlus junctionMaskImp = opts.manualJunction
                 ? createMaskFromImageManual(ecadImp, "JunctionMask")
                 : createMaskFromImageAuto(ecadImp, "Default dark", "JunctionMask", false);
         if (junctionMaskImp == null) {
             IJ.error("Fluorescence Junction Analyzer", "Junction mask creation was cancelled or failed.");
             return;
         }
-        applyErosionDilation(junctionMaskImp, junctionCloseIterations, junctionOpenIterations); 
+        applyErosionDilation(junctionMaskImp, opts.junctionCloseIterations, opts.junctionOpenIterations);
 
         Roi junctionRoi = ThresholdToSelection.run(junctionMaskImp);
         if (junctionRoi == null) {
@@ -164,12 +382,12 @@ public class Analyze_Intensity implements PlugIn {
         double[] junction = measureCurrentRoi(poiImp);
 
         // ---- Nuclear mask from the DAPI image --------------------------------------------
-        ImagePlus nuclearMaskImp = manualNuclear
+        ImagePlus nuclearMaskImp = opts.manualNuclear
                 ? createMaskFromImageManual(dapiImp, "NuclearMask")
                 : createMaskFromImageAuto(dapiImp, "Huang dark", "NuclearMask", true);
         double[] nuclear = new double[]{0, 0, 0, 0};
         if (nuclearMaskImp != null) {
-            applyErosionDilation(nuclearMaskImp, nuclearCloseIterations, nuclearOpenIterations);
+            applyErosionDilation(nuclearMaskImp, opts.nuclearCloseIterations, opts.nuclearOpenIterations);
             Roi nuclearRoi = ThresholdToSelection.run(nuclearMaskImp);
             if (nuclearRoi != null) {
                 poiImp.setRoi((Roi) nuclearRoi.clone());
@@ -193,7 +411,7 @@ public class Analyze_Intensity implements PlugIn {
             }
         }
 
-        // 8) Background selection: place an exact-area circle, let the user drag it.
+        // ---- Background selection: place an exact-area circle, let the user drag it ------
         placeBackgroundOval(poiImp, BACKGROUND_CIRCLE_AREA);
         new WaitForUserDialog(
                 "Background Selection",
@@ -201,8 +419,6 @@ public class Analyze_Intensity implements PlugIn {
                         + " (calibrated units^2) has been placed on " + poiImp.getTitle() + ".\n"
                         + "Drag it to a representative background region, then click OK."
         ).show();
-
-        // 9) Measure the background region with the same four measurements.
         double[] background = measureCurrentRoi(poiImp);
 
         // ---- Save overlay TIFFs for each mask ---------------------------------------------
@@ -226,40 +442,36 @@ public class Analyze_Intensity implements PlugIn {
         double jcRatio = (cytoplasmic[3] > 0) ? junction[3] / cytoplasmic[3] : Double.NaN;
         double jnRatio = (nuclear[3] > 0) ? junction[3] / nuclear[3] : Double.NaN;
 
-        // 10) Add all measurements to the summary table.
-        summary.incrementCounter();
-        summary.addValue("POI Image", poiImp.getTitle());
-        summary.addValue("Junction Area", junction[0]);
-        summary.addValue("Junction IntDen", junction[1]);
-        summary.addValue("Junction RawIntDen", junction[2]);
-        summary.addValue("Junction Mean", junction[3]);
-        summary.addValue("Nuclear Area", nuclear[0]);
-        summary.addValue("Nuclear IntDen", nuclear[1]);
-        summary.addValue("Nuclear RawIntDen", nuclear[2]);
-        summary.addValue("Nuclear Mean", nuclear[3]);
-        summary.addValue("Cytoplasmic Area", cytoplasmic[0]);
-        summary.addValue("Cytoplasmic IntDen", cytoplasmic[1]);
-        summary.addValue("Cytoplasmic RawIntDen", cytoplasmic[2]);
-        summary.addValue("Cytoplasmic Mean", cytoplasmic[3]);
-        summary.addValue("Background Area", background[0]);
-        summary.addValue("Background IntDen", background[1]);
-        summary.addValue("Background RawIntDen", background[2]);
-        summary.addValue("Background Mean", background[3]);
-        summary.addValue("Junctional/Cytoplasmic (Mean)", jcRatio);
-        summary.addValue("Junctional/Nuclear (Mean)", jnRatio);
+        table.incrementCounter();
+        table.addValue("POI Image", poiImp.getTitle());
+        table.addValue("Junction Area", junction[0]);
+        table.addValue("Junction IntDen", junction[1]);
+        table.addValue("Junction RawIntDen", junction[2]);
+        table.addValue("Junction Mean", junction[3]);
+        table.addValue("Nuclear Area", nuclear[0]);
+        table.addValue("Nuclear IntDen", nuclear[1]);
+        table.addValue("Nuclear RawIntDen", nuclear[2]);
+        table.addValue("Nuclear Mean", nuclear[3]);
+        table.addValue("Cytoplasmic Area", cytoplasmic[0]);
+        table.addValue("Cytoplasmic IntDen", cytoplasmic[1]);
+        table.addValue("Cytoplasmic RawIntDen", cytoplasmic[2]);
+        table.addValue("Cytoplasmic Mean", cytoplasmic[3]);
+        table.addValue("Background Area", background[0]);
+        table.addValue("Background IntDen", background[1]);
+        table.addValue("Background RawIntDen", background[2]);
+        table.addValue("Background Mean", background[3]);
+        table.addValue("Junctional/Cytoplasmic (Mean)", jcRatio);
+        table.addValue("Junctional/Nuclear (Mean)", jnRatio);
     }
 
-    /**
-     * Applies binary erosion followed by dilation to the given mask, using the
-     * requested iteration counts. Eroding first removes small isolated dots/noise;
-     * dilating afterward restores the size of the structures that survived. Either
-     * count can be 0 to skip that step.
-     */
+    // Applies binary erosion followed by dilation ("close", to remove holes) and/or
+    // dilation followed by erosion ("open", to remove small isolated dots) to the
+    // given mask. Either count can be 0 to skip that step.
     private void applyErosionDilation(ImagePlus mask, int closeIterations, int openIterations) {
         Prefs.blackBackground = true;
         if (closeIterations > 0) {
-        	IJ.run(mask, "Dilate", "iterations=" + closeIterations + " count=1");
-        	IJ.run(mask, "Erode", "iterations=" + closeIterations + " count=1");
+            IJ.run(mask, "Dilate", "iterations=" + closeIterations + " count=1");
+            IJ.run(mask, "Erode", "iterations=" + closeIterations + " count=1");
         }
         if (openIterations > 0) {
             IJ.run(mask, "Erode", "iterations=" + openIterations + " count=1");
@@ -267,11 +479,9 @@ public class Analyze_Intensity implements PlugIn {
         }
     }
 
-    /**
-     * Builds a mask from the given image using an automatic ImageJ threshold method
-     * (e.g. "Default dark", "Huang dark"). Optionally applies a median filter
-     * afterward (used for the nuclear/DAPI mask).
-     */
+    // Builds a mask from the given image using an automatic ImageJ threshold method
+    // (e.g. "Default dark", "Huang dark"). Optionally applies a median filter
+    // afterward (used for the nuclear/DAPI mask).
     private ImagePlus createMaskFromImageAuto(ImagePlus imp, String thresholdMethod, String maskTitle, boolean applyMedian) {
         ImagePlus dup = imp.duplicate();
         dup.setTitle(maskTitle);
@@ -285,12 +495,9 @@ public class Analyze_Intensity implements PlugIn {
         return dup;
     }
 
-    /**
-     * Builds a mask from the given image by letting the user drag a slider and see
-     * a live threshold preview, then confirm. Applies the same Despeckle / Dilate /
-     * Fill Holes cleanup used by the original manual-threshold workflow. Returns
-     * null if the user cancels.
-     */
+    // Builds a mask from the given image by letting the user drag a slider and see a
+    // live threshold preview, then confirm. Applies Despeckle / Dilate / Fill Holes
+    // cleanup afterward. Returns null if the user cancels.
     private ImagePlus createMaskFromImageManual(ImagePlus imp, String maskTitle) {
         ImagePlus copy = imp.duplicate();
         copy.setTitle(maskTitle + " (preview)");
@@ -337,29 +544,21 @@ public class Analyze_Intensity implements PlugIn {
         return copy;
     }
 
-    /**
-     * Cytoplasmic mask = NOT (nuclear mask OR junction mask), i.e. everything that is
-     * neither nucleus nor junction.
-     */
+    // Cytoplasmic mask = NOT (nuclear mask OR junction mask), i.e. everything that is
+    // neither nucleus nor junction.
     private ImagePlus createCytoplasmicMask(ImagePlus nuclearMask, ImagePlus junctionMask) {
         ImageCalculator ic = new ImageCalculator();
-
-        // 1. Union of nuclear and junction masks (areas to exclude)
         ImagePlus excludedMask = ic.run("Add create", nuclearMask, junctionMask);
 
-        // 2. Invert the excluded mask to get the cytoplasmic mask
         ImageProcessor excludedIP = excludedMask.getProcessor();
         excludedIP.invert();
         excludedIP.resetMinAndMax();
         excludedIP.setBinaryThreshold();
-        ImagePlus cytoplasmicMask = new ImagePlus("CytoplasmicMask", excludedIP);
-        return cytoplasmicMask;
+        return new ImagePlus("CytoplasmicMask", excludedIP);
     }
 
-    /**
-     * Draws the given mask as a semi-transparent yellow overlay on the source image,
-     * flattens it, and saves it as a TIFF in the given directory.
-     */
+    // Draws the given mask as a semi-transparent yellow overlay on the source image,
+    // flattens it, and saves it as a TIFF in the given directory.
     private boolean saveOverlay(ImagePlus source, ImagePlus mask, String dir) {
         Roi maskRoi = ThresholdToSelection.run(mask);
         if (maskRoi == null) return false;
@@ -382,55 +581,50 @@ public class Analyze_Intensity implements PlugIn {
     // =====================================================================================
     // METHOD 2: 6 um Line
     // =====================================================================================
-    private void runMethod2SixMicronLine(ImagePlus imp) {
-
+    private void runMethod2SixMicronLine(ImagePlus imp, ResultsTable table, double lineLengthUm) {
         RoiManager rm = getRoiManager();
         rm.reset();
         bringToFront(imp);
 
         ArrayList<String> roiTypeLabels = new ArrayList<>();
-
         for (int rep = 1; rep <= 3; rep++) {
-            captureCalibratedLine(imp, rm, "junctional line (repeat " + rep + " of 3)", LINE_LENGTH_UM);
+            if (!captureCalibratedLine(imp, rm, "junctional line (repeat " + rep + " of 3)", lineLengthUm)) return;
             roiTypeLabels.add("POI");
 
-            captureCalibratedLine(imp, rm, "background line (repeat " + rep + " of 3)", LINE_LENGTH_UM);
+            if (!captureCalibratedLine(imp, rm, "background line (repeat " + rep + " of 3)", lineLengthUm)) return;
             roiTypeLabels.add("Background");
         }
 
-        // 8) Confirm all datapoints have been added.
         new WaitForUserDialog(
                 "Confirm ROIs",
                 "Have all datapoints been added to the ROI Manager? Click OK to proceed to measurement."
         ).show();
 
-        // 9-10) Measure every ROI in the manager and label each pair (POI, Background).
         int count = rm.getCount();
         for (int i = 0; i < count; i++) {
             rm.select(imp, i);
             double[] meas = measureCurrentRoi(imp);
 
-            String roiType = (i < roiTypeLabels.size()) ? roiTypeLabels.get(i) : (i % 2 == 0 ? "POI" : "Background");
+            String roiType = roiTypeLabels.get(i);
             String pairLabel = "Pair " + ((i / 2) + 1);
 
-            summary.incrementCounter();
-            summary.addValue("Image", imp.getTitle());
-            summary.addValue("Pair", pairLabel);
-            summary.addValue("ROI Type", roiType);
-            summary.addValue("Area", meas[0]);
-            summary.addValue("IntDen", meas[1]);
-            summary.addValue("RawIntDen", meas[2]);
-            summary.addValue("Mean", meas[3]);
+            table.incrementCounter();
+            table.addValue("Image", imp.getTitle());
+            table.addValue("Pair", pairLabel);
+            table.addValue("ROI Type", roiType);
+            table.addValue("Length", meas[0]);
+            table.addValue("IntDen", meas[1]);
+            table.addValue("RawIntDen", meas[2]);
+            table.addValue("Mean", meas[3]);
         }
     }
 
-    /**
-     * Prompts the user to draw a line and press 't' to add it to the ROI Manager,
-     * rescales that line to an exact calibrated length (keeping its midpoint and
-     * angle fixed), then lets the user reposition it without changing its length.
-     */
-    private void captureCalibratedLine(ImagePlus imp, RoiManager rm, String description, double lengthUm) {
-
+    // Prompts the user to draw a line and press 't' to add it to the ROI Manager,
+    // rescales that line to an exact calibrated length (keeping its midpoint and
+    // angle fixed), then lets the user reposition it without changing its length.
+    // Returns false if no usable line ROI was captured, so the caller can stop
+    // instead of recording a label for an ROI that was never added.
+    private boolean captureCalibratedLine(ImagePlus imp, RoiManager rm, String description, double lengthUm) {
         int countBefore = rm.getCount();
         new WaitForUserDialog(
                 "Draw Line",
@@ -440,7 +634,7 @@ public class Analyze_Intensity implements PlugIn {
         if (rm.getCount() <= countBefore) {
             IJ.error("Fluorescence Junction Analyzer",
                     "No new ROI was added to the ROI Manager for the " + description + ". Please rerun.");
-            return;
+            return false;
         }
 
         int index = rm.getCount() - 1;
@@ -449,28 +643,26 @@ public class Analyze_Intensity implements PlugIn {
         if (!(roi instanceof Line)) {
             IJ.error("Fluorescence Junction Analyzer",
                     "The most recently added ROI is not a line (" + description + ").");
-            return;
+            return false;
         }
 
         adjustLineLength(imp, rm, index, lengthUm);
 
-        // 3/6) Let the user fine-tune position without changing length.
+        // Let the user fine-tune position without changing length.
         new WaitForUserDialog(
                 "Confirm Position",
                 "Confirm the " + description + " is in the correct position, then click OK.\n"
                         + "(You may reposition it without changing its length.)"
         ).show();
 
-        // Persist any position change back into the ROI Manager entry.
         rm.select(imp, index);
         rm.runCommand("Update");
+        return true;
     }
 
-    /**
-     * Rescales a Line ROI already in the ROI Manager to an exact calibrated length,
-     * using the image's pixel calibration (the same metadata the scale bar tool uses),
-     * keeping the line's midpoint and angle unchanged.
-     */
+    // Rescales a Line ROI already in the ROI Manager to an exact calibrated length,
+    // using the image's pixel calibration, keeping the line's midpoint and angle
+    // unchanged.
     private void adjustLineLength(ImagePlus imp, RoiManager rm, int index, double lengthUm) {
         rm.select(imp, index);
         Roi roi = imp.getRoi();
@@ -499,9 +691,13 @@ public class Analyze_Intensity implements PlugIn {
         double newX2 = midX + (dx / 2.0) * scale;
         double newY2 = midY + (dy / 2.0) * scale;
 
-        Line newLine = new Line(newX1, newY1, newX2, newY2);
-        imp.setRoi(newLine);
-        rm.select(index);
+        // IMPORTANT: do NOT call rm.select(index) here — that would re-fetch the
+        // original, un-resized line from the manager and redraw it on the image,
+        // undoing the resize above before Update ever runs. "Update" saves whatever
+        // ROI is currently on imp into the still-selected manager slot from the
+        // rm.select(imp, index) call at the top of this method, so just set the
+        // resized line on imp and update — no reselection needed.
+        imp.setRoi(new Line(newX1, newY1, newX2, newY2));
         rm.runCommand("Update");
     }
 
@@ -526,10 +722,8 @@ public class Analyze_Intensity implements PlugIn {
         }
     }
 
-    /**
-     * Places an oval ROI on the image with an EXACT calibrated area, centered on the
-     * image, ready for the user to drag to a background region.
-     */
+    // Places an oval ROI on the image with an EXACT calibrated area, centered on the
+    // image, ready for the user to drag to a background region.
     private void placeBackgroundOval(ImagePlus imp, double calibratedArea) {
         bringToFront(imp);
         Calibration cal = imp.getCalibration();
@@ -542,15 +736,12 @@ public class Analyze_Intensity implements PlugIn {
         double x = (imp.getWidth() / 2.0) - radiusPixels;
         double y = (imp.getHeight() / 2.0) - radiusPixels;
 
-        OvalRoi oval = new OvalRoi(x, y, diameterPixels, diameterPixels);
-        imp.setRoi(oval);
+        imp.setRoi(new OvalRoi(x, y, diameterPixels, diameterPixels));
     }
 
-    /**
-     * Measures the current ROI on the given image and returns
-     * {Area, IntDen, RawIntDen, Mean} in that order.
-     * IntDen = calibrated Area x Mean. RawIntDen = pixel count x raw (uncalibrated) mean.
-     */
+    // Measures the current ROI on the given image and returns
+    // {Area, IntDen, RawIntDen, Mean}. IntDen = calibrated Area x Mean;
+    // RawIntDen = pixel count x raw (uncalibrated) mean.
     private double[] measureCurrentRoi(ImagePlus imp) {
         Roi roi = imp.getRoi();
         if (roi == null) {
@@ -562,28 +753,37 @@ public class Analyze_Intensity implements PlugIn {
         ip.setRoi(roi);
 
         int measurements = Measurements.AREA | Measurements.MEAN | Measurements.INTEGRATED_DENSITY;
-
         ImageStatistics calibratedStats = ImageStatistics.getStatistics(ip, measurements, imp.getCalibration());
         ImageStatistics rawStats = ImageStatistics.getStatistics(ip, measurements, null);
 
-        double area = calibratedStats.area;
+        double length = roi.getLength();
         double mean = calibratedStats.mean;
         double intDen = calibratedStats.area * calibratedStats.mean;
         double rawIntDen = rawStats.pixelCount * rawStats.mean;
 
-        return new double[]{area, intDen, rawIntDen, mean};
+        return new double[]{length, intDen, rawIntDen, mean};
     }
 
-    /**
-     * Offers to save the summary table as CSV or Excel (.xls), defaulting to the
-     * analyzed directory with the filename "analysis_summary" so that it is
-     * discoverable by Combine_Analysis_Summaries, and always displays it as a
-     * results window as well.
-     */
-    private void saveSummaryDialog(String defaultDir) {
-        if (summary.size() == 0) {
-            IJ.log("Fluorescence Junction Analyzer: no measurements were recorded.");
-            return;
+    // Saves one folder's summary table under baseFileName (see summaryBaseFileName()).
+    // In batch mode, saves silently as "<baseFileName>.csv" with no per-folder
+    // prompts. In single-folder mode, shows the results table and lets the user
+    // pick the format/location, defaulting to the same base name.
+    private boolean saveSummary(ResultsTable table, String dir, String baseFileName, boolean batchMode) {
+        if (table.size() == 0) {
+            IJ.log("Fluorescence Junction Analyzer: no measurements were recorded for " + dir);
+            return false;
+        }
+
+        if (batchMode) {
+            String path = dir + File.separator + baseFileName + ".csv";
+            try {
+                table.save(path);
+                IJ.log("Saved: " + path);
+                return true;
+            } catch (Exception e) {
+                IJ.log("Failed to save summary for " + dir + ": " + e.getMessage());
+                return false;
+            }
         }
 
         GenericDialog gd = new GenericDialog("Save Summary Table");
@@ -592,23 +792,24 @@ public class Analyze_Intensity implements PlugIn {
         gd.addChoice("File format:", formats, formats[0]);
         gd.showDialog();
 
-        summary.show("Fluorescence Junction Analyzer - Summary");
-
-        if (gd.wasCanceled()) return;
+        table.show("Fluorescence Junction Analyzer - Summary");
+        if (gd.wasCanceled()) return true;
 
         String choice = gd.getNextChoice();
         String extension = choice.startsWith("CSV") ? ".csv" : ".xls";
 
-        SaveDialog sd = new SaveDialog("Save Summary Table", defaultDir, "analysis_summary", extension);
-        String dir = sd.getDirectory();
+        SaveDialog sd = new SaveDialog("Save Summary Table", dir, baseFileName, extension);
+        String outDir = sd.getDirectory();
         String name = sd.getFileName();
-        if (dir == null || name == null) return;
+        if (outDir == null || name == null) return true;
 
         try {
-            summary.save(dir + name);
-            IJ.log("Summary table saved to " + dir + name);
+            table.save(outDir + name);
+            IJ.log("Summary table saved to " + outDir + name);
+            return true;
         } catch (Exception e) {
             IJ.error("Fluorescence Junction Analyzer", "Error saving file: " + e.getMessage());
+            return false;
         }
     }
 }

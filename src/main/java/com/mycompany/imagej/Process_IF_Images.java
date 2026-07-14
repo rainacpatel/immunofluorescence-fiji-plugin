@@ -3,6 +3,7 @@ package com.mycompany.imagej; //change here and pom.xml
 import ij.*;
 import ij.io.DirectoryChooser;
 import java.util.ArrayList;
+import java.util.List;
 import ij.plugin.PlugIn;
 import ij.plugin.ChannelSplitter;
 import ij.gui.GenericDialog;
@@ -10,7 +11,6 @@ import java.io.File;
 import ij.io.FileSaver;
 import ij.process.ImageProcessor;
 import ij.process.ColorProcessor;
-import ij.IJ;
 import ij.plugin.RGBStackMerge;
 import ij.plugin.RGBStackConverter;
 import ij.process.LUT;
@@ -80,7 +80,6 @@ public class Process_IF_Images implements PlugIn {
         
         if (gd.wasCanceled()) return;
 
-        // 
         POIChannel       = (int) gd.getNextNumber();
         POIColor         = gd.getNextChoice();
         junctionChannel = (int) gd.getNextNumber();
@@ -113,7 +112,11 @@ public class Process_IF_Images implements PlugIn {
             openImages.add(imp);
         }
 
-        boolean suc = true;
+        // Track per-image results so one bad image doesn't hide failures in
+        // otherwise-successful images (or vice versa).
+        List<String> successes = new ArrayList<>();
+        List<String> failures = new ArrayList<>();
+
         for (ImagePlus imp : openImages) {
             String title = imp.getTitle();
             String newTitle = title.replaceAll("[\\\\/:*?\"<>|]", "_");
@@ -128,14 +131,19 @@ public class Process_IF_Images implements PlugIn {
                 imageFolder.mkdirs();
             }
 
-            suc = splitImage(imp, imageFolder.getAbsolutePath());
+            boolean ok = splitImage(imp, imageFolder.getAbsolutePath());
+            if (ok) successes.add(newTitle); else failures.add(newTitle);
         }
 
-        if (suc) {
+        if (failures.isEmpty()) {
             WindowManager.closeAllWindows();
             IJ.showMessage("Complete", "All images processed and saved successfully.");
         } else {
-            IJ.showMessage("Complete", "Error processing one or more files, see log");
+            StringBuilder sb = new StringBuilder("Processed " + successes.size() + " of " + openImages.size() + " images.\n\n");
+            sb.append("Failed:\n");
+            for (String f : failures) sb.append("  \u2717 ").append(f).append("\n");
+            sb.append("\nSee Fiji Log window for details.");
+            IJ.showMessage("Complete with errors", sb.toString());
         }
     }
 

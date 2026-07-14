@@ -52,10 +52,9 @@ public class Z_Projection_IF implements PlugIn {
     }
 
     // Z-projection type. Each constant carries the ZProjector method code (the
-    // exact strings ZProjector.run(...) accepts — "avg", "max", "sd" — see
-    // ij.plugin.ZProjector docs) and the file-name prefix that reflects the actual
-    // projection performed, so the saved output is never mislabeled "MAX" when it's
-    // really an average or standard-deviation projection.
+    // exact string ZProjector.run(...) accepts, e.g. "avg", "max", "sd") and the
+    // file-name prefix, so saved output is never mislabeled "MAX" for a different
+    // projection type.
     private enum ProjMethod {
         MAXIMUM("Maximum Intensity", "max", "MAX"),
         AVERAGE("Average Intensity", "avg", "AVG"),
@@ -152,11 +151,9 @@ public class Z_Projection_IF implements PlugIn {
             foldersToProcess.add(new File(dir));
         }
 
-        // Slice ranges are resolved upfront, per folder, for the two manual modes.
-        // "Whole stack" needs no upfront range — it's resolved per-image from each
-        // stack's own size inside processOneFolder. In single-folder mode, both
-        // collection methods below naturally run their prompt exactly once, since
-        // foldersToProcess has only one entry.
+        // Slice ranges are resolved upfront for the two manual modes; "Whole stack"
+        // needs no upfront range since it's resolved per-image inside
+        // processOneFolder from each stack's own size.
         Map<File, int[]> folderRanges = new HashMap<>();
         if (rangeMode == RangeMode.MANUAL_VIEW) {
             if (!collectManualViewRanges(foldersToProcess, folderRanges)) return;
@@ -183,9 +180,9 @@ public class Z_Projection_IF implements PlugIn {
         showSummary(projMethod, rangeMode, successes, failures);
     }
 
-    // Manual-view mode: for every folder, opens that folder's own Junction image so
-    // the user can scroll to the apical junctional complex and pick a range specific
-    // to that folder. Returns false (aborting the whole run) if the user cancels.
+    // Opens each folder's own Junction image so the user can scroll to the apical
+    // junctional complex and pick a range specific to that folder. Returns false
+    // (aborting the whole run) if the user cancels.
     private boolean collectManualViewRanges(List<File> folders, Map<File, int[]> outRanges) {
         for (File folder : folders) {
             File junctionFile = findFileByPrefix(folder, "Junction_");
@@ -236,10 +233,9 @@ public class Z_Projection_IF implements PlugIn {
         return true;
     }
 
-    // Manual-input mode: in single-folder mode, a simple one-off first/last dialog.
-    // In batch mode, a single dialog lists first/last fields for every folder in
-    // order, plus a checkbox to apply one shared range to all folders instead.
-    // Returns false (aborting the whole run) if the user cancels.
+    // Single-folder mode: a simple one-off first/last dialog. Batch mode: one
+    // dialog listing first/last fields per folder, plus a checkbox to apply a
+    // shared range to all folders instead. Returns false if the user cancels.
     private boolean collectManualInputRanges(List<File> folders, boolean batchMode, Map<File, int[]> outRanges) {
         if (!batchMode) {
             File folder = folders.get(0);
@@ -301,10 +297,9 @@ public class Z_Projection_IF implements PlugIn {
         IJ.showMessage("Processing complete", sb.toString());
     }
 
-    // Resolves the [firstSlice, lastSlice] to use for a given stack size and range
-    // mode. Both manual modes pass the folder's already-collected values straight
-    // through (clamped to the actual stack size); whole-stack mode projects every
-    // slice.
+    // Resolves [firstSlice, lastSlice] for a stack size and range mode. Manual
+    // modes pass the folder's collected values through, clamped to the stack size;
+    // whole-stack mode projects every slice.
     private int[] resolveSliceRange(RangeMode rangeMode, int stackSize, int manualFirst, int manualLast) {
         if (rangeMode == RangeMode.WHOLE) {
             return new int[]{1, stackSize};
@@ -315,12 +310,10 @@ public class Z_Projection_IF implements PlugIn {
         }
     }
 
-    // Builds a projection title that embeds the projection method's own prefix
-    // (MAX/AVG/STD — never hardcoded) and the resolved slice range, e.g.
-    // "AVG_S2-4_IF_SomeImage". Strips any trailing image extension from the source
-    // title first — same cleanup Process_IF_Images.changeAndRenameChannel() does —
-    // so the ".tif" from the opened file doesn't end up duplicated in the saved
-    // output name.
+    // Builds a projection title embedding the method's prefix and slice range,
+    // e.g. "AVG_2-4_SomeImage". Strips any trailing image extension first — same
+    // cleanup as Process_IF_Images.changeAndRenameChannel() — so it isn't
+    // duplicated in the saved output name.
     private String titleWithRange(ProjMethod projMethod, String originalTitle, int[] range) {
         String cleanTitle = originalTitle.replaceAll("(?i)\\.(tif|tiff|jpg|png)$", "");
         return projMethod.prefix() + "_" + range[0] + "-" + range[1] + "_" + cleanTitle;
@@ -328,8 +321,8 @@ public class Z_Projection_IF implements PlugIn {
 
     // Saves a projection as a TIFF, optionally converting it to RGB first — mirrors
     // Process_IF_Images.saveImage(). Single-channel projections carry a color LUT
-    // rather than real RGB pixels; convertToRGB bakes that LUT color into the pixel
-    // data itself, per slice, and prefixes the file name with "RGB_".
+    // rather than real RGB pixels; convertToRGB bakes that LUT into the pixel data
+    // and prefixes the file name with "RGB_".
     private void saveProjection(ImagePlus img, String dir, boolean convertToRGB) {
         ImagePlus imp = img.duplicate();
 
@@ -362,11 +355,9 @@ public class Z_Projection_IF implements PlugIn {
         }
     }
 
-    // Processes a single folder — called once per folder in both single and batch
-    // mode so the logic is never duplicated. For whole-stack mode, the actual range
-    // is resolved here from each image's own stack size, so batch runs with
-    // differing stack sizes between folders each get correct ranges rather than one
-    // global range.
+    // Called once per folder in both single and batch mode. For whole-stack mode,
+    // the range is resolved here from each image's own stack size, so folders with
+    // differing stack sizes each get a correct range rather than one global range.
     private boolean processOneFolder(String dir, RangeMode rangeMode, int manualFirst, int manualLast,
                                       ProjMethod projMethod, boolean closeInBatch,
                                       boolean save8bit, boolean saveRGB) {
@@ -383,6 +374,10 @@ public class Z_Projection_IF implements PlugIn {
         }
 
         int[] junctionRange = resolveSliceRange(rangeMode, impJunction.getStackSize(), manualFirst, manualLast);
+        if (junctionRange[0] > junctionRange[1]) {
+            IJ.log("Invalid slice range for: " + junctionFile.getName());
+            return false;
+        }
         ImagePlus projJunction = ZProjector.run(impJunction, projMethod.code(), junctionRange[0], junctionRange[1]);
         if (projJunction == null) {
             IJ.log("Projection failed for Junction: " + junctionFile.getName());
@@ -398,31 +393,27 @@ public class Z_Projection_IF implements PlugIn {
             return false;
         }
 
-        // Projects the merged RGB composite directly from the already-merged
-        // "Merged_*" TIFF, rather than re-merging the projected channels, so it
-        // stays consistent with the saved, intensity-adjusted merge output. Treated
-        // as critical, same as DAPI/IF, since the merged image is essential for
-        // visualizing the data.
+        // Projects directly from the already-merged "Merged_*" TIFF rather than
+        // re-merging the projected channels, so it stays consistent with the
+        // saved, intensity-adjusted merge. Treated as critical, same as DAPI/POI.
         ImagePlus projMerged = makeProjection(dir, "Merged_", rangeMode, manualFirst, manualLast, projMethod);
         if (projMerged == null) {
             IJ.log("Failed to project Merged image in: " + dir);
             return false;
         }
 
-        // Slice range is embedded in the "Z Projections" folder name (using the
-        // Junction channel's range as the folder's reference range) and in every
-        // saved file name (using that image's own resolved range, via
-        // titleWithRange), so ranges are traceable even if a channel's own stack
-        // size ever differs from the Junction channel's.
+        // Slice range is embedded in the output folder name (using the Junction
+        // channel's range) and in every saved file name (using that image's own
+        // resolved range via titleWithRange), so ranges stay traceable even if a
+        // channel's stack size differs from the Junction channel's.
         String folderSuffix = " (" + junctionRange[0] + "-" + junctionRange[1] + ")";
         File saveFolder = new File(dir, projMethod.prefix() + " PROJECTIONS" + folderSuffix);
         if (!saveFolder.exists()) saveFolder.mkdir();
 
-        // The Junction/DAPI/IF projections are single-channel with a color LUT
-        // attached (inherited from Process_IF_Images). "8-bit" saves them as-is;
-        // "RGB" bakes the LUT color into real RGB pixels first, same as
-        // Process_IF_Images does for its split channels. Merged is already an RGB
-        // composite, so it's always saved once regardless of these checkboxes.
+        // Junction/DAPI/POI projections are single-channel with a color LUT
+        // attached (inherited from Process_IF_Images); "RGB" bakes that LUT into
+        // real RGB pixels, same as Process_IF_Images does for its split channels.
+        // Merged is already RGB, so it's always saved once regardless.
         if (save8bit) {
             saveProjection(projJunction, saveFolder.getAbsolutePath(), false);
             saveProjection(projDAPI, saveFolder.getAbsolutePath(), false);
@@ -435,10 +426,8 @@ public class Z_Projection_IF implements PlugIn {
         }
         saveProjection(projMerged, saveFolder.getAbsolutePath(), false);
 
-        // In batch mode, close all open image windows after saving — with many
-        // subfolders, leaving multiple windows open per folder quickly clutters the
-        // workspace. In single-folder mode, leave them open so the user can inspect
-        // the result immediately.
+        // Close windows after each folder in batch mode to avoid clutter; in
+        // single-folder mode, leave them open so the user can inspect the result.
         if (closeInBatch) {
             WindowManager.closeAllWindows();
         } else {
@@ -453,8 +442,8 @@ public class Z_Projection_IF implements PlugIn {
     }
 
     // Finds the first image file in a folder whose name starts with the given
-    // prefix. Shared by run() and makeProjection() so the search logic isn't
-    // duplicated.
+    // prefix. Shared by collectManualViewRanges(), processOneFolder(), and
+    // makeProjection().
     private File findFileByPrefix(File folder, String prefix) {
         if (!folder.isDirectory()) return null;
 
@@ -473,19 +462,10 @@ public class Z_Projection_IF implements PlugIn {
         return null;
     }
 
-    // Original single-argument version kept for backwards compatibility —
-    // delegates to the new version, always as a Maximum Intensity projection
-    // (matching its original, pre-refactor behavior). Takes fixed slice numbers
-    // rather than a range mode.
-    @Deprecated
-    public ImagePlus makeMaxProj(String dir, String searchStart, int firstSlice, int lastSlice) {
-        return makeProjection(dir, searchStart, RangeMode.MANUAL, firstSlice, lastSlice, ProjMethod.MAXIMUM);
-    }
-
-    // Replaces blocking IJ.showMessage() calls with IJ.log() — a blocking dialog
-    // inside a helper method would halt batch processing at every missing file.
-    // Errors are collected in the log and shown in the summary at the end. Range
-    // is resolved from THIS image's own stack size.
+    // Finds the file starting with searchStart in dir, opens it, and returns its
+    // projection over the range resolved from ITS OWN stack size. Errors go to
+    // IJ.log() rather than a blocking dialog, so batch mode doesn't halt on every
+    // missing file — failures are collected and shown in the summary at the end.
     public ImagePlus makeProjection(String dir, String searchStart, RangeMode rangeMode,
                                      int manualFirst, int manualLast, ProjMethod projMethod) {
         if (dir == null || searchStart == null) {
