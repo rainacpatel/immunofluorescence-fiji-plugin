@@ -612,7 +612,7 @@ public class Analyze_Intensity implements PlugIn {
             table.addValue("Image", imp.getTitle());
             table.addValue("Pair", pairLabel);
             table.addValue("ROI Type", roiType);
-            table.addValue("Length", meas[0]);
+            table.addValue("Area", meas[0]);
             table.addValue("IntDen", meas[1]);
             table.addValue("RawIntDen", meas[2]);
             table.addValue("Mean", meas[3]);
@@ -756,12 +756,12 @@ public class Analyze_Intensity implements PlugIn {
         ImageStatistics calibratedStats = ImageStatistics.getStatistics(ip, measurements, imp.getCalibration());
         ImageStatistics rawStats = ImageStatistics.getStatistics(ip, measurements, null);
 
-        double length = roi.getLength();
+        double area = calibratedStats.area;
         double mean = calibratedStats.mean;
         double intDen = calibratedStats.area * calibratedStats.mean;
         double rawIntDen = rawStats.pixelCount * rawStats.mean;
 
-        return new double[]{length, intDen, rawIntDen, mean};
+        return new double[]{area, intDen, rawIntDen, mean};
     }
 
     // Saves one folder's summary table under baseFileName (see summaryBaseFileName()).
