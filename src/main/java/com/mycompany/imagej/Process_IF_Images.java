@@ -112,8 +112,6 @@ public class Process_IF_Images implements PlugIn {
             openImages.add(imp);
         }
 
-        // Track per-image results so one bad image doesn't hide failures in
-        // otherwise-successful images (or vice versa).
         List<String> successes = new ArrayList<>();
         List<String> failures = new ArrayList<>();
 

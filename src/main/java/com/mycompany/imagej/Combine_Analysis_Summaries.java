@@ -12,10 +12,7 @@ public class Combine_Analysis_Summaries implements PlugIn {
     public void run(String arg) {
         GenericDialog gd = new GenericDialog("Select Directory");
         gd.addDirectoryField("Select Folder: ", "");
-        // Analyze_Intensity.java names its output after the method/line length used
-        // (e.g. "analysis_summary_method1.csv", "analysis_summary_method2_6um.csv"),
-        // so results from different settings never overwrite each other and can be
-        // compiled separately here.
+        
         gd.addStringField("Summary CSV filename to compile: ", "analysis_summary_method1.csv", 30);
         gd.addCheckbox("Skip folders that have not been analyzed", false);
         gd.showDialog();
@@ -81,7 +78,7 @@ public class Combine_Analysis_Summaries implements PlugIn {
         }
 
         if (csvFiles.isEmpty()) {
-            IJ.error("No valid analysis_summary.csv files found!");
+            IJ.error("No valid analysis summary files found. Please check the summary CSV filename before compiling.");
             return;
         }
 

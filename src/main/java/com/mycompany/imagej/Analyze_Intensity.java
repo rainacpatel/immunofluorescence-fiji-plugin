@@ -32,18 +32,10 @@ import java.util.List;
 
 public class Analyze_Intensity implements PlugIn {
 
-    /** Default line length, in micrometers, offered in the Method 2 options dialog. */
     private static final double DEFAULT_LINE_LENGTH_UM = 6.0;
-
-    /** Exact area, in calibrated units^2, for the Method 1 background circle. */
     private static final double BACKGROUND_CIRCLE_AREA = 39.136;
-
-    /** pick your sampling width */
-    
     private static final double LINE_WIDTH_PIXELS = 1.0; 
 
-    // Analysis method the user picks in the options dialog. Each constant carries
-    // its own dialog label so there's one place to add/rename a method.
     private enum AnalysisMethod {
         METHOD1_THRESHOLD("Method 1: Junctional Threshold Mask"),
         METHOD2_LINE("Method 2: Manual Line");
@@ -74,8 +66,6 @@ public class Analyze_Intensity implements PlugIn {
         }
     }
 
-    // Bundles the Method 1 mask-cleanup dialog answers, gathered once upfront and
-    // reused for every folder, instead of threading six parameters through calls.
     private static class ThresholdOptions {
         final boolean manualJunction;
         final boolean manualNuclear;
@@ -99,7 +89,6 @@ public class Analyze_Intensity implements PlugIn {
     @Override
     public void run(String arg) {
 
-        // ---- Step 1: method + batch mode ----------------------------------------------
         GenericDialog optGd = new GenericDialog("Analysis Options");
         optGd.addChoice("Method:", AnalysisMethod.labels(), AnalysisMethod.METHOD1_THRESHOLD.toString());
         optGd.addNumericField("Method 2 - Line length (micrometers):", DEFAULT_LINE_LENGTH_UM, 2);
@@ -117,20 +106,15 @@ public class Analyze_Intensity implements PlugIn {
             IJ.error("Fluorescence Junction Analyzer", "Line length must be greater than 0.");
             return;
         }
-
-        // Gathered once upfront and reused for every folder, instead of
-        // re-prompting per folder in batch mode.
+        
         ThresholdOptions threshOpts = null;
         if (method == AnalysisMethod.METHOD1_THRESHOLD) {
             threshOpts = collectThresholdOptions();
             if (threshOpts == null) return; // cancelled
         }
 
-        // Not strictly required since we measure via ImageStatistics directly, but
-        // keeps Analyze > Measure in sync if the user checks anything manually.
         IJ.run("Set Measurements...", "area mean integrated redirect=None decimal=3");
 
-        // ---- Step 2: choose folder(s) ---------------------------------------------------
         DirectoryChooser dc = new DirectoryChooser(
                 batchMode ? "Select parent folder containing subfolders" : "Select image folder");
         String dir = dc.getDirectory();
@@ -150,7 +134,6 @@ public class Analyze_Intensity implements PlugIn {
             foldersToProcess.add(new File(dir));
         }
 
-        // ---- Step 3: process each folder -------------------------------------------------
         List<String> successes = new ArrayList<>();
         List<String> failures = new ArrayList<>();
 
@@ -165,8 +148,7 @@ public class Analyze_Intensity implements PlugIn {
         }
     }
 
-    // Locates/opens the images, runs the selected method, and saves the summary
-    // for one folder. Called once per folder in both single and batch mode.
+    
     private boolean processOneFolder(File folder, AnalysisMethod method, ThresholdOptions threshOpts,
                                       double lineLengthUm, boolean batchMode) {
         ImagePlus dapiImp, ecadImp, poiImp;
@@ -240,8 +222,6 @@ public class Analyze_Intensity implements PlugIn {
         String baseFileName = summaryBaseFileName(method, lineLengthUm);
         boolean saved = saveSummary(folderSummary, imageDir.getAbsolutePath(), baseFileName, batchMode);
 
-        // Close windows after each folder in batch mode to avoid clutter; leave
-        // them open in single-folder mode.
         if (batchMode) {
             WindowManager.closeAllWindows();
         }
@@ -249,9 +229,7 @@ public class Analyze_Intensity implements PlugIn {
         return saved;
     }
 
-    // Single-folder mode: lets the user assign DAPI/Junction/POI from dropdowns,
-    // defaulting each to the first file matching its naming convention. Returns
-    // {dapiFile, ecadFile, poiFile} names, or null if cancelled/no images found.
+
     private String[] promptForImages(File folder) {
         String[] fileList = folder.list((d, name) -> {
             String lname = name.toLowerCase();
@@ -282,8 +260,6 @@ public class Analyze_Intensity implements PlugIn {
         return new String[]{gd.getNextChoice(), gd.getNextChoice(), gd.getNextChoice()};
     }
 
-    // Finds the first child directory whose name contains " PROJECTIONS" — the
-    // naming convention from Z_Projection_IF, also used by Combine_Analysis_Summaries.
     private File findProjectionsFolder(File folder) {
         File[] files = folder.listFiles();
         if (files == null) return null;
@@ -301,10 +277,10 @@ public class Analyze_Intensity implements PlugIn {
         gdThresh.addChoice("Junction mask thresholding:", thresholdModes, thresholdModes[0]);
         gdThresh.addChoice("Nuclear mask thresholding:", thresholdModes, thresholdModes[0]);
         gdThresh.addMessage("Optional mask cleanup:\nSet to 0 to skip.");
-        gdThresh.addNumericField("Junction mask - Dilation/erosion size to close holes:", 0, 0);
-        gdThresh.addNumericField("Junction mask - Erosion/dilation size to remove small, isolated dots:", 0, 0);
-        gdThresh.addNumericField("Nuclear mask - Dilation/erosion size to close holes:", 0, 0);
-        gdThresh.addNumericField("Nuclear mask - Erosion/dilation size to remove small, isolated noise:", 0, 0);
+        gdThresh.addNumericField("Junction mask - Close holes (dilation/erosion):", 0, 0);
+        gdThresh.addNumericField("Junction mask - Remove small, isolated dots (erosion/dilation):", 0, 0);
+        gdThresh.addNumericField("Nuclear mask - Close holes (dilation/erosion):", 0, 0);
+        gdThresh.addNumericField("Nuclear mask - Remove small, isolated dots (erosion/dilation):", 0, 0);
         gdThresh.showDialog();
         if (gdThresh.wasCanceled()) return null;
 
@@ -320,9 +296,6 @@ public class Analyze_Intensity implements PlugIn {
                 nuclearCloseIterations, nuclearOpenIterations);
     }
 
-    // Base output filename (no extension), specific to the method — and, for
-    // Method 2, the line length — so different settings never overwrite each
-    // other and Combine_Analysis_Summaries.java can target one set at a time.
     private String summaryBaseFileName(AnalysisMethod method, double lineLengthUm) {
         if (method == AnalysisMethod.METHOD1_THRESHOLD) {
             return "analysis_summary_method1";
@@ -331,8 +304,6 @@ public class Analyze_Intensity implements PlugIn {
         }
     }
 
-    // Formats a line length without a trailing ".0" for whole numbers (e.g. 6 not
-    // 6.0), so filenames stay tidy for the common case.
     private String formatLength(double value) {
         if (value == Math.floor(value) && !Double.isInfinite(value)) {
             return String.valueOf((long) value);
@@ -362,7 +333,6 @@ public class Analyze_Intensity implements PlugIn {
     private void runMethod1JunctionalThreshold(ImagePlus dapiImp, ImagePlus ecadImp, ImagePlus poiImp, String dir,
                                                 ThresholdOptions opts, ResultsTable table) {
 
-        // ---- Junction mask from the Ecad image ------------------------------------------
         ImagePlus junctionMaskImp = opts.manualJunction
                 ? createMaskFromImageManual(ecadImp, "JunctionMask")
                 : createMaskFromImageAuto(ecadImp, "Default dark", "JunctionMask", false);
@@ -380,12 +350,10 @@ public class Analyze_Intensity implements PlugIn {
             return;
         }
 
-        // Overlay the junction mask selection on top of the POI image and measure.
         bringToFront(poiImp);
         poiImp.setRoi((Roi) junctionRoi.clone());
         double[] junction = measureCurrentRoi(poiImp);
 
-        // ---- Nuclear mask from the DAPI image --------------------------------------------
         ImagePlus nuclearMaskImp = opts.manualNuclear
                 ? createMaskFromImageManual(dapiImp, "NuclearMask")
                 : createMaskFromImageAuto(dapiImp, "Huang dark", "NuclearMask", true);
@@ -401,7 +369,6 @@ public class Analyze_Intensity implements PlugIn {
             }
         }
 
-        // ---- Cytoplasmic mask = NOT (nuclear OR junction) --------------------------------
         double[] cytoplasmic = new double[]{0, 0, 0, 0};
         ImagePlus cytoMaskImp = null;
         if (nuclearMaskImp != null) {
@@ -415,7 +382,6 @@ public class Analyze_Intensity implements PlugIn {
             }
         }
 
-        // ---- Background selection: place an exact-area circle, let the user drag it ------
         placeBackgroundOval(poiImp, BACKGROUND_CIRCLE_AREA);
         new WaitForUserDialog(
                 "Background Selection",
@@ -425,12 +391,11 @@ public class Analyze_Intensity implements PlugIn {
         ).show();
         double[] background = measureCurrentRoi(poiImp);
 
-        // ---- Save overlay TIFFs for each mask ---------------------------------------------
+        
         saveOverlay(poiImp, junctionMaskImp, dir);
         if (nuclearMaskImp != null) saveOverlay(poiImp, nuclearMaskImp, dir);
         if (cytoMaskImp != null) saveOverlay(poiImp, cytoMaskImp, dir);
 
-        // Clean up mask windows.
         junctionMaskImp.changes = false;
         junctionMaskImp.close();
         if (nuclearMaskImp != null) {
@@ -442,7 +407,6 @@ public class Analyze_Intensity implements PlugIn {
             cytoMaskImp.close();
         }
 
-        // ---- Ratios (based on Mean intensity) ----------------------------------------------
         double jcRatio = (cytoplasmic[3] > 0) ? junction[3] / cytoplasmic[3] : Double.NaN;
         double jnRatio = (nuclear[3] > 0) ? junction[3] / nuclear[3] : Double.NaN;
 
@@ -468,9 +432,7 @@ public class Analyze_Intensity implements PlugIn {
         table.addValue("Junctional/Nuclear (Mean)", jnRatio);
     }
 
-    // Applies binary erosion followed by dilation ("close", to remove holes) and/or
-    // dilation followed by erosion ("open", to remove small isolated dots) to the
-    // given mask. Either count can be 0 to skip that step.
+
     private void applyErosionDilation(ImagePlus mask, int closeIterations, int openIterations) {
         Prefs.blackBackground = true;
         if (closeIterations > 0) {
@@ -483,9 +445,7 @@ public class Analyze_Intensity implements PlugIn {
         }
     }
 
-    // Builds a mask from the given image using an automatic ImageJ threshold method
-    // (e.g. "Default dark", "Huang dark"). Optionally applies a median filter
-    // afterward (used for the nuclear/DAPI mask).
+
     private ImagePlus createMaskFromImageAuto(ImagePlus imp, String thresholdMethod, String maskTitle, boolean applyMedian) {
         ImagePlus dup = imp.duplicate();
         dup.setTitle(maskTitle);
@@ -499,9 +459,7 @@ public class Analyze_Intensity implements PlugIn {
         return dup;
     }
 
-    // Builds a mask from the given image by letting the user drag a slider and see a
-    // live threshold preview, then confirm. Applies Despeckle / Dilate / Fill Holes
-    // cleanup afterward. Returns null if the user cancels.
+
     private ImagePlus createMaskFromImageManual(ImagePlus imp, String maskTitle) {
         ImagePlus copy = imp.duplicate();
         copy.setTitle(maskTitle + " (preview)");
@@ -548,8 +506,7 @@ public class Analyze_Intensity implements PlugIn {
         return copy;
     }
 
-    // Cytoplasmic mask = NOT (nuclear mask OR junction mask), i.e. everything that is
-    // neither nucleus nor junction.
+ 
     private ImagePlus createCytoplasmicMask(ImagePlus nuclearMask, ImagePlus junctionMask) {
         ImageCalculator ic = new ImageCalculator();
         ImagePlus excludedMask = ic.run("Add create", nuclearMask, junctionMask);
@@ -561,8 +518,6 @@ public class Analyze_Intensity implements PlugIn {
         return new ImagePlus("CytoplasmicMask", excludedIP);
     }
 
-    // Draws the given mask as a semi-transparent yellow overlay on the source image,
-    // flattens it, and saves it as a TIFF in the given directory.
     private boolean saveOverlay(ImagePlus source, ImagePlus mask, String dir) {
         Roi maskRoi = ThresholdToSelection.run(mask);
         if (maskRoi == null) return false;
@@ -623,11 +578,6 @@ public class Analyze_Intensity implements PlugIn {
         }
     }
 
-    // Prompts the user to draw a line and press 't' to add it to the ROI Manager,
-    // rescales that line to an exact calibrated length (keeping its midpoint and
-    // angle fixed), then lets the user reposition it without changing its length.
-    // Returns false if no usable line ROI was captured, so the caller can stop
-    // instead of recording a label for an ROI that was never added.
     private boolean captureCalibratedLine(ImagePlus imp, RoiManager rm, String description, double lengthUm) {
         int countBefore = rm.getCount();
         new WaitForUserDialog(
@@ -664,10 +614,8 @@ public class Analyze_Intensity implements PlugIn {
         return true;
     }
 
-    // Rescales a Line ROI already in the ROI Manager to an exact calibrated length,
-    // using the image's pixel calibration, keeping the line's midpoint and angle
-    // unchanged.
-private void adjustLineLength(ImagePlus imp, RoiManager rm, int index, double lengthUm) {
+    
+    private void adjustLineLength(ImagePlus imp, RoiManager rm, int index, double lengthUm) {
         rm.select(imp, index);
         Roi roi = imp.getRoi();
         if (!(roi instanceof Line)) return;
@@ -683,8 +631,6 @@ private void adjustLineLength(ImagePlus imp, RoiManager rm, int index, double le
         double dx = x2 - x1;
         double dy = y2 - y1;
 
-        // Convert the line vector into calibrated (real-world) space so the
-        // rescale is exact even if pixelWidth != pixelHeight.
         double dxUm = dx * pixelWidth;
         double dyUm = dy * pixelHeight;
         double currentLengthUm = Math.sqrt(dxUm * dxUm + dyUm * dyUm);
@@ -698,18 +644,11 @@ private void adjustLineLength(ImagePlus imp, RoiManager rm, int index, double le
         double newDxUm = dxUm * scale;
         double newDyUm = dyUm * scale;
 
-        // Convert back to pixel space per-axis.
         double newX1 = midX - (newDxUm / pixelWidth) / 2.0;
         double newY1 = midY - (newDyUm / pixelHeight) / 2.0;
         double newX2 = midX + (newDxUm / pixelWidth) / 2.0;
         double newY2 = midY + (newDyUm / pixelHeight) / 2.0;
 
-        // IMPORTANT: do NOT call rm.select(index) here — that would re-fetch the
-        // original, un-resized line from the manager and redraw it on the image,
-        // undoing the resize above before Update ever runs. "Update" saves whatever
-        // ROI is currently on imp into the still-selected manager slot from the
-        // rm.select(imp, index) call at the top of this method, so just set the
-        // resized line on imp and update — no reselection needed.
         Line newLine = new Line(newX1, newY1, newX2, newY2);
         newLine.setStrokeWidth(LINE_WIDTH_PIXELS);
         imp.setRoi(newLine);
@@ -735,9 +674,7 @@ private void adjustLineLength(ImagePlus imp, RoiManager rm, int index, double le
             imp.getWindow().toFront();
         }
     }
-
-    // Places an oval ROI on the image with an EXACT calibrated area, centered on the
-    // image, ready for the user to drag to a background region.
+    
     private void placeBackgroundOval(ImagePlus imp, double calibratedArea) {
         bringToFront(imp);
         Calibration cal = imp.getCalibration();
@@ -753,9 +690,7 @@ private void adjustLineLength(ImagePlus imp, RoiManager rm, int index, double le
         imp.setRoi(new OvalRoi(x, y, diameterPixels, diameterPixels));
     }
 
-    // Measures the current ROI on the given image and returns
-    // {Area, IntDen, RawIntDen, Mean}. IntDen = calibrated Area x Mean;
-    // RawIntDen = pixel count x raw (uncalibrated) mean.
+    
     private double[] measureCurrentRoi(ImagePlus imp) {
         Roi roi = imp.getRoi();
         if (roi == null) {
@@ -778,10 +713,7 @@ private void adjustLineLength(ImagePlus imp, RoiManager rm, int index, double le
         return new double[]{area, intDen, rawIntDen, mean};
     }
 
-    // Saves one folder's summary table under baseFileName (see summaryBaseFileName()).
-    // In batch mode, saves silently as "<baseFileName>.csv" with no per-folder
-    // prompts. In single-folder mode, shows the results table and lets the user
-    // pick the format/location, defaulting to the same base name.
+    
     private boolean saveSummary(ResultsTable table, String dir, String baseFileName, boolean batchMode) {
         if (table.size() == 0) {
             IJ.log("Fluorescence Junction Analyzer: no measurements were recorded for " + dir);
