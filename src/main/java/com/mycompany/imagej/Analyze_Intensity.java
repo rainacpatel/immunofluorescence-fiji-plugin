@@ -21,7 +21,7 @@ import ij.plugin.PlugIn;
 import ij.plugin.filter.ThresholdToSelection;
 import ij.plugin.frame.RoiManager;
 import ij.process.ImageProcessor;
-import ij.process.ImageStatistics;
+import ij.plugin.filter.Analyzer;
 import ij.Prefs;
 
 import java.awt.AWTEvent;
@@ -216,7 +216,7 @@ public class Analyze_Intensity implements PlugIn {
         if (method == AnalysisMethod.METHOD1_THRESHOLD) {
             runMethod1JunctionalThreshold(dapiImp, ecadImp, poiImp, imageDir.getAbsolutePath(), threshOpts, folderSummary);
         } else {
-            runMethod2SixMicronLine(poiImp, folderSummary, lineLengthUm);
+            runMethod2MicronLine(poiImp, folderSummary, lineLengthUm);
         }
 
         String baseFileName = summaryBaseFileName(method, lineLengthUm);
@@ -245,9 +245,9 @@ public class Analyze_Intensity implements PlugIn {
         int defaultDAPI = 0, defaultJunction = 0, defaultPOI = 0;
         for (int i = 0; i < fileList.length; i++) {
             String name = fileList[i];
-            if (name.contains("DAPI_") && (!name.contains("RGB")) && defaultDAPI == 0) defaultDAPI = i;
-            if (name.contains("Junction_") && (!name.contains("RGB")) && defaultJunction == 0) defaultJunction = i;
-            if (name.contains("POI_") && (!name.contains("RGB")) && defaultPOI == 0) defaultPOI = i;
+            if (name.contains("DAPI_") && (!name.contains("RGB")) && (!name.contains("overlay")) && defaultDAPI == 0) defaultDAPI = i;
+            if (name.contains("Junction_") && (!name.contains("RGB")) && (!name.contains("overlay")) && defaultJunction == 0) defaultJunction = i;
+            if (name.contains("POI_") && (!name.contains("RGB")) && (!name.contains("overlay")) && defaultPOI == 0) defaultPOI = i;
         }
 
         GenericDialog gd = new GenericDialog("Select Images — " + folder.getName());
@@ -540,7 +540,7 @@ public class Analyze_Intensity implements PlugIn {
     // =====================================================================================
     // METHOD 2: 6 um Line
     // =====================================================================================
-    private void runMethod2SixMicronLine(ImagePlus imp, ResultsTable table, double lineLengthUm) {
+    private void runMethod2MicronLine(ImagePlus imp, ResultsTable table, double lineLengthUm) {
         RoiManager rm = getRoiManager();
         rm.reset();
         bringToFront(imp);
@@ -702,13 +702,16 @@ public class Analyze_Intensity implements PlugIn {
         ip.setRoi(roi);
 
         int measurements = Measurements.AREA | Measurements.MEAN | Measurements.INTEGRATED_DENSITY;
-        ImageStatistics calibratedStats = ImageStatistics.getStatistics(ip, measurements, imp.getCalibration());
-        ImageStatistics rawStats = ImageStatistics.getStatistics(ip, measurements, null);
 
-        double area = calibratedStats.area;
-        double mean = calibratedStats.mean;
-        double intDen = calibratedStats.area * calibratedStats.mean;
-        double rawIntDen = rawStats.pixelCount * rawStats.mean;
+        ResultsTable rt = new ResultsTable();
+        Analyzer analyzer = new Analyzer(imp, measurements, rt);
+        analyzer.measure();
+
+        int row = rt.getCounter() - 1;   // the row just added
+        double area    = rt.getValue("Area", row);
+        double mean    = rt.getValue("Mean", row);
+        double intDen  = rt.getValue("IntDen", row);
+        double rawIntDen = rt.getValue("RawIntDen", row);
 
         return new double[]{area, intDen, rawIntDen, mean};
     }
