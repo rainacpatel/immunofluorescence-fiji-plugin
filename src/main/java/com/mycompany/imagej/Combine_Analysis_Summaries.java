@@ -53,7 +53,7 @@ public class Combine_Analysis_Summaries implements PlugIn {
                     }
                 }
             }
-            // maxProjFolder stays null if no "* PROJECTIONS" folder was found.
+
             if (maxProjFolder == null) {
                 missing.add(subdir.getName() + " (missing Projections)");
                 continue;
@@ -67,7 +67,6 @@ public class Combine_Analysis_Summaries implements PlugIn {
             }
         }
 
-        // Handle missing directories depending on user choice.
         if (!missing.isEmpty() && !skipMissing) {
             StringBuilder sb = new StringBuilder("The following directories are missing data:\n");
             for (String m : missing) {
@@ -82,9 +81,6 @@ public class Combine_Analysis_Summaries implements PlugIn {
             return;
         }
 
-        // Compile all CSVs into one, prefixing each row with its subdirectory name.
-        // Output name mirrors the source filename so compiled results from different
-        // methods/line lengths land in separate files too.
         String compiledName = "compiled_" + csvFileName;
         File outputFile = new File(parentDir, compiledName);
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(outputFile))) {

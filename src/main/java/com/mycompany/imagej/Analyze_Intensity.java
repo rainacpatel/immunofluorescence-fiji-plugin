@@ -451,6 +451,7 @@ public class Analyze_Intensity implements PlugIn {
         dup.setTitle(maskTitle);
         IJ.setAutoThreshold(dup, thresholdMethod);
         IJ.run(dup, "Convert to Mask", "");
+        IJ.run(dup, "Despeckle", "");
         Prefs.blackBackground = true;
         if (applyMedian) {
             IJ.run(dup, "Median", "radius=3");
@@ -499,8 +500,6 @@ public class Analyze_Intensity implements PlugIn {
         Prefs.blackBackground = true;
         IJ.run(copy, "Convert to Mask", "");
         IJ.run(copy, "Despeckle", "");
-        IJ.run(copy, "Dilate", "");
-        IJ.run(copy, "Fill Holes", "");
         copy.setTitle(maskTitle);
         copy.hide();
         return copy;
