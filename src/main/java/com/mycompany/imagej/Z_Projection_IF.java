@@ -420,29 +420,26 @@ public class Z_Projection_IF implements PlugIn {
 
     public ImagePlus makeProjection(String dir, String searchStart, RangeMode rangeMode,
                                      int manualFirst, int manualLast, ProjMethod projMethod) {
+        // Validation
         if (dir == null || searchStart == null) {
             IJ.log("makeProjection: null directory or search string.");
             return null;
         }
-
         File targetFile = findFileByPrefix(new File(dir), searchStart);
         if (targetFile == null) {
             IJ.log("No image starting with '" + searchStart + "' found in: " + dir);
             return null;
         }
-
         ImagePlus imp = IJ.openImage(targetFile.getAbsolutePath());
         if (imp == null) {
             IJ.log("Failed to open image: " + targetFile.getName());
             return null;
         }
-
         int stackSize = imp.getStackSize();
         if (stackSize < 2) {
             IJ.log("Image does not have multiple slices: " + targetFile.getName());
             return null;
         }
-
         int[] range = resolveSliceRange(rangeMode, stackSize, manualFirst, manualLast);
         int firstSlice = range[0];
         int lastSlice = range[1];
@@ -451,6 +448,7 @@ public class Z_Projection_IF implements PlugIn {
             return null;
         }
 
+        // Projection
         ImagePlus proj = ZProjector.run(imp, projMethod.code(), firstSlice, lastSlice);
         proj.setTitle(titleWithRange(projMethod, imp.getTitle(), range));
         return proj;

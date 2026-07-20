@@ -328,11 +328,11 @@ public class Analyze_Intensity implements PlugIn {
     }
 
     // =====================================================================================
-    // METHOD 1: Junctional Threshold (+ Nuclear / Cytoplasmic compartments)
+    // METHOD 1: Junctional Threshold (+ Nuclear / Cytoplasmic Mask)
     // =====================================================================================
     private void runMethod1JunctionalThreshold(ImagePlus dapiImp, ImagePlus ecadImp, ImagePlus poiImp, String dir,
                                                 ThresholdOptions opts, ResultsTable table) {
-
+        // Generate and measure junctional mask
         ImagePlus junctionMaskImp = opts.manualJunction
                 ? createMaskFromImageManual(ecadImp, "JunctionMask")
                 : createMaskFromImageAuto(ecadImp, "Default dark", "JunctionMask", false);
@@ -341,7 +341,6 @@ public class Analyze_Intensity implements PlugIn {
             return;
         }
         applyErosionDilation(junctionMaskImp, opts.junctionCloseIterations, opts.junctionOpenIterations);
-
         Roi junctionRoi = ThresholdToSelection.run(junctionMaskImp);
         if (junctionRoi == null) {
             IJ.error("Fluorescence Junction Analyzer", "Could not create a selection from the junction mask.");
@@ -349,11 +348,11 @@ public class Analyze_Intensity implements PlugIn {
             junctionMaskImp.close();
             return;
         }
-
         bringToFront(poiImp);
         poiImp.setRoi((Roi) junctionRoi.clone());
         double[] junction = measureCurrentRoi(poiImp);
-
+        
+        // Generate and measure nuclear mask
         ImagePlus nuclearMaskImp = opts.manualNuclear
                 ? createMaskFromImageManual(dapiImp, "NuclearMask")
                 : createMaskFromImageAuto(dapiImp, "Huang dark", "NuclearMask", true);
@@ -369,6 +368,7 @@ public class Analyze_Intensity implements PlugIn {
             }
         }
 
+        // Generate and measure cytoplasmic mask
         double[] cytoplasmic = new double[]{0, 0, 0, 0};
         ImagePlus cytoMaskImp = null;
         if (nuclearMaskImp != null) {
@@ -382,6 +382,7 @@ public class Analyze_Intensity implements PlugIn {
             }
         }
 
+        // Measure background
         placeBackgroundOval(poiImp, BACKGROUND_CIRCLE_AREA);
         new WaitForUserDialog(
                 "Background Selection",
@@ -391,7 +392,7 @@ public class Analyze_Intensity implements PlugIn {
         ).show();
         double[] background = measureCurrentRoi(poiImp);
 
-        
+        // Save and close masks
         saveOverlay(poiImp, junctionMaskImp, dir);
         if (nuclearMaskImp != null) saveOverlay(poiImp, nuclearMaskImp, dir);
         if (cytoMaskImp != null) saveOverlay(poiImp, cytoMaskImp, dir);
@@ -407,9 +408,11 @@ public class Analyze_Intensity implements PlugIn {
             cytoMaskImp.close();
         }
 
+        // Calculate ratios
         double jcRatio = (cytoplasmic[3] > 0) ? junction[3] / cytoplasmic[3] : Double.NaN;
         double jnRatio = (nuclear[3] > 0) ? junction[3] / nuclear[3] : Double.NaN;
 
+        // Save measurements
         table.incrementCounter();
         table.addValue("POI Image", poiImp.getTitle());
         table.addValue("Junction Area", junction[0]);
@@ -537,35 +540,33 @@ public class Analyze_Intensity implements PlugIn {
     }
 
     // =====================================================================================
-    // METHOD 2: 6 um Line
+    // METHOD 2: Manual um Line
     // =====================================================================================
     private void runMethod2MicronLine(ImagePlus imp, ResultsTable table, double lineLengthUm) {
         RoiManager rm = getRoiManager();
         rm.reset();
         bringToFront(imp);
 
+        // Add background and junctional lines to ROI Manager
         ArrayList<String> roiTypeLabels = new ArrayList<>();
         for (int rep = 1; rep <= 3; rep++) {
             if (!captureCalibratedLine(imp, rm, "junctional line (repeat " + rep + " of 3)", lineLengthUm)) return;
             roiTypeLabels.add("POI");
-
             if (!captureCalibratedLine(imp, rm, "background line (repeat " + rep + " of 3)", lineLengthUm)) return;
             roiTypeLabels.add("Background");
         }
-
         new WaitForUserDialog(
                 "Confirm ROIs",
                 "Have all datapoints been added to the ROI Manager? Click OK to proceed to measurement."
         ).show();
 
+        // Measure and save intensities
         int count = rm.getCount();
         for (int i = 0; i < count; i++) {
             rm.select(imp, i);
             double[] meas = measureCurrentRoi(imp);
-
             String roiType = roiTypeLabels.get(i);
             String pairLabel = "Pair " + ((i / 2) + 1);
-
             table.incrementCounter();
             table.addValue("Image", imp.getTitle());
             table.addValue("Pair", pairLabel);

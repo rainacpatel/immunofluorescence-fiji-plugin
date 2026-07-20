@@ -184,6 +184,7 @@ public class Process_IF_Images implements PlugIn {
         String imageTitle = imp.getTitle();
         int nChannels = imp.getNChannels();
         
+        // Validation
         if (nChannels < 3) {
             IJ.showMessage("Error", imageTitle + " does not have at least 3 channels.");
             return false;
@@ -204,7 +205,8 @@ public class Process_IF_Images implements PlugIn {
             IJ.showMessage("Error", imageTitle + ": Each channel must have a unique color.");
             return false;
         }
-
+        
+        // Split channels
         ImagePlus[] channels = ChannelSplitter.split(imp);
 
         ImagePlus poiIm = changeAndRenameChannel(channels, POIChannel, imp.getTitle(), "POI", POIMin, POIMax);
@@ -215,6 +217,7 @@ public class Process_IF_Images implements PlugIn {
         applyLut(junctionIm, junctionColor);
         applyLut(dapiIm, dapiColor);
         
+        // Save stacks
         if (save8bit) {
         	saveImage(poiIm, dir, false);
         	saveImage(dapiIm, dir, false);
@@ -227,8 +230,8 @@ public class Process_IF_Images implements PlugIn {
         	saveImage(junctionIm, dir, true);
         }
 
+        // Create and save merged stack
         ImagePlus[] mergeInput = buildMergeInput(poiIm, POIColor, junctionIm, junctionColor, dapiIm, dapiColor);
-
         ImagePlus merged = RGBStackMerge.mergeChannels(mergeInput, false);
 
         if (merged != null) {
