@@ -332,6 +332,11 @@ public class Analyze_Intensity implements PlugIn {
     // =====================================================================================
     private void runMethod1JunctionalThreshold(ImagePlus dapiImp, ImagePlus ecadImp, ImagePlus poiImp, String dir,
                                                 ThresholdOptions opts, ResultsTable table) {
+        // Establish this once, up front, so every mask created/selected in this
+        // method (junction, nuclear, cytoplasmic) uses the same foreground
+        // convention, regardless of call order or leftover session state.
+        Prefs.blackBackground = true;
+
         // Generate and measure junctional mask
         ImagePlus junctionMaskImp = opts.manualJunction
                 ? createMaskFromImageManual(ecadImp, "JunctionMask")
@@ -341,7 +346,7 @@ public class Analyze_Intensity implements PlugIn {
             return;
         }
         applyErosionDilation(junctionMaskImp, opts.junctionCloseIterations, opts.junctionOpenIterations);
-        Roi junctionRoi = ThresholdToSelection.run(junctionMaskImp);
+        Roi junctionRoi = maskToSelection(junctionMaskImp);
         if (junctionRoi == null) {
             IJ.error("Fluorescence Junction Analyzer", "Could not create a selection from the junction mask.");
             junctionMaskImp.changes = false;
@@ -359,7 +364,7 @@ public class Analyze_Intensity implements PlugIn {
         double[] nuclear = new double[]{0, 0, 0, 0};
         if (nuclearMaskImp != null) {
             applyErosionDilation(nuclearMaskImp, opts.nuclearCloseIterations, opts.nuclearOpenIterations);
-            Roi nuclearRoi = ThresholdToSelection.run(nuclearMaskImp);
+            Roi nuclearRoi = maskToSelection(nuclearMaskImp);
             if (nuclearRoi != null) {
                 poiImp.setRoi((Roi) nuclearRoi.clone());
                 nuclear = measureCurrentRoi(poiImp);
@@ -373,7 +378,7 @@ public class Analyze_Intensity implements PlugIn {
         ImagePlus cytoMaskImp = null;
         if (nuclearMaskImp != null) {
             cytoMaskImp = createCytoplasmicMask(nuclearMaskImp, junctionMaskImp);
-            Roi cytoRoi = ThresholdToSelection.run(cytoMaskImp);
+            Roi cytoRoi = maskToSelection(cytoMaskImp);
             if (cytoRoi != null) {
                 poiImp.setRoi((Roi) cytoRoi.clone());
                 cytoplasmic = measureCurrentRoi(poiImp);
@@ -452,10 +457,15 @@ public class Analyze_Intensity implements PlugIn {
     private ImagePlus createMaskFromImageAuto(ImagePlus imp, String thresholdMethod, String maskTitle, boolean applyMedian) {
         ImagePlus dup = imp.duplicate();
         dup.setTitle(maskTitle);
+        // Must be set BEFORE "Convert to Mask" — it determines whether the
+        // thresholded (foreground) pixels come out as 255-on-black or
+        // 0-on-white. Setting it afterward doesn't change the mask that was
+        // just baked, only future operations, which caused mask polarity to
+        // depend on unrelated prior state elsewhere in the plugin/session.
+        Prefs.blackBackground = true;
         IJ.setAutoThreshold(dup, thresholdMethod);
         IJ.run(dup, "Convert to Mask", "");
         IJ.run(dup, "Despeckle", "");
-        Prefs.blackBackground = true;
         if (applyMedian) {
             IJ.run(dup, "Median", "radius=3");
         }
@@ -497,8 +507,14 @@ public class Analyze_Intensity implements PlugIn {
         }
 
         int threshold = (int) gd.getNextNumber();
-        ip.threshold(threshold);
+        // Use the untouched original pixel data and set an explicit threshold range,
+        // rather than pre-binarizing the pixels. "Convert to Mask" only honors a
+        // threshold that has actually been set via setThreshold(); if no threshold is
+        // set on the processor it silently falls back to auto-thresholding, which was
+        // discarding the user's manual selection and making Manual mode behave
+        // identically to Auto mode.
         copy.setProcessor(ip);
+        copy.getProcessor().setThreshold(threshold, 255, ImageProcessor.NO_LUT_UPDATE);
         copy.updateAndDraw();
         Prefs.blackBackground = true;
         IJ.run(copy, "Convert to Mask", "");
@@ -521,7 +537,7 @@ public class Analyze_Intensity implements PlugIn {
     }
 
     private boolean saveOverlay(ImagePlus source, ImagePlus mask, String dir) {
-        Roi maskRoi = ThresholdToSelection.run(mask);
+        Roi maskRoi = maskToSelection(mask);
         if (maskRoi == null) return false;
         maskRoi.setFillColor(new Color(255, 255, 0, 128));
         maskRoi.setStrokeColor(Color.YELLOW);
@@ -657,6 +673,22 @@ public class Analyze_Intensity implements PlugIn {
     // =====================================================================================
     // Shared helpers
     // =====================================================================================
+
+    /**
+     * Converts a binary mask (0/255) to a Roi. Explicitly declares foreground
+     * = 255 on the mask's own processor immediately before conversion, rather
+     * than letting ThresholdToSelection.run() guess from the global
+     * Prefs.blackBackground flag at call time. That fallback guess is only as
+     * reliable as whatever last touched the global flag — and with multiple
+     * masks, dialogs, and mask-generation calls happening in between the
+     * first (measurement) and second (save) use of the same mask, it proved
+     * unreliable. Setting the threshold explicitly here makes every
+     * conversion self-contained and order-independent.
+     */
+    private Roi maskToSelection(ImagePlus mask) {
+        mask.getProcessor().setThreshold(255, 255, ImageProcessor.NO_LUT_UPDATE);
+        return ThresholdToSelection.run(mask);
+    }
 
     private RoiManager getRoiManager() {
         RoiManager rm = RoiManager.getInstance();
